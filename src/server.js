@@ -49,16 +49,24 @@ app.post("/webhook", async (req, res) => {
   // Parse body
   const payload = JSON.parse(req.body.toString());
   const eventType = req.headers["x-datocms-event"] || payload.event_type;
+  const entityType = payload.entity_type || payload.entity?.type || "";
 
-  console.log(`📥 Webhook received: ${eventType}`);
+  console.log(`📥 Webhook received: event=${eventType}, entity_type=${entityType}`);
 
-  // Only process upload events
-  if (eventType !== "upload.create" && eventType !== "upload.update") {
+  // Accept both DatoCMS formats: "create" with entity_type "upload", or "upload.create"
+  const isUploadEvent =
+    eventType === "upload.create" ||
+    eventType === "upload.update" ||
+    ((eventType === "create" || eventType === "update") && entityType === "upload");
+
+  if (!isUploadEvent) {
+    console.log(`⏭️  Skipped: not an upload event (event=${eventType}, entity_type=${entityType})`);
     return res.json({ status: "skipped", reason: "not an upload event" });
   }
 
   const entity = payload.entity || payload.data;
-  if (!entity) {
+  if (!entity || !entity.id) {
+    console.error("❌ No entity or entity.id in payload:", JSON.stringify(payload).substring(0, 500));
     return res.status(400).json({ error: "No entity in payload" });
   }
 
