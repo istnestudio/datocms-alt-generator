@@ -48,6 +48,7 @@ async function generateAltTexts(imageUrl, locales, filename = "", mediaType = "i
 
   const localeNames = {
     en: "English",
+    "pl-PL": "Polish",
     pl: "Polish",
     ru: "Russian",
     de: "German",

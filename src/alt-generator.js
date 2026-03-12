@@ -106,6 +106,7 @@ async function generateAltTextsFromBase64(base64Image, locales, filename, mediaT
   const context = process.env.BUSINESS_CONTEXT || "business website";
   const localeNames = {
     en: "English",
+    "pl-PL": "Polish",
     pl: "Polish",
     ru: "Russian",
     de: "German",
