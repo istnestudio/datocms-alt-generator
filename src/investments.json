@@ -28,5 +28,15 @@
     "seo_pl": "nowe mieszkania Łowicz, blok mieszkalny od dewelopera",
     "seo_en": "new apartments Łowicz, residential apartment building",
     "seo_ru": "новые квартиры Лович, многоквартирный жилой дом"
+  },
+  {
+    "keywords": ["sfera"],
+    "name": "Osiedle Sfera",
+    "type": "segmentowa",
+    "description": "domy segmentowe, osiedle domów",
+    "location": "Wawer, Warszawa",
+    "seo_pl": "domy segmentowe Wawer Warszawa, osiedle domów od dewelopera",
+    "seo_en": "townhouses Wawer Warsaw, semi-detached houses development",
+    "seo_ru": "таунхаусы Вавер Варшава, сегментные дома от застройщика"
   }
 ]
