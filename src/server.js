@@ -1,12 +1,16 @@
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
+const path = require("path");
 const { processAsset } = require("./alt-generator");
 const { getDatocmsClient } = require("./datocms-client");
 const { translateFields } = require("./translator");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ── Serve DatoCMS plugin static files ──
+app.use("/plugin", express.static(path.join(__dirname, "..", "datocms-plugin", "public")));
 
 // ── Raw body for webhook signature verification ──
 app.use(
