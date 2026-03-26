@@ -1,0 +1,30 @@
+{
+  "name": "datocms-translate-plugin",
+  "version": "1.0.0",
+  "homepage": "https://github.com/istnestudio/datocms-alt-generator",
+  "description": "Auto-translate DatoCMS content from Polish to English and Russian using Claude AI",
+  "main": "build/index.html",
+  "scripts": {
+    "start": "npx serve public -l 5000",
+    "build": "cp -r public build"
+  },
+  "datoCmsPlugin": {
+    "title": "AI Translator",
+    "previewImage": "",
+    "entryPoint": "public/index.html",
+    "pluginType": "sidebar",
+    "fieldTypes": [],
+    "parameters": {
+      "global": [
+        {
+          "id": "translationServerUrl",
+          "label": "Translation Server URL",
+          "type": "string",
+          "required": true,
+          "default": "",
+          "hint": "URL of your translation server (e.g. https://datocms-alt-generator.onrender.com)"
+        }
+      ]
+    }
+  }
+}

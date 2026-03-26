@@ -3,6 +3,7 @@ const express = require("express");
 const crypto = require("crypto");
 const { processAsset } = require("./alt-generator");
 const { getDatocmsClient } = require("./datocms-client");
+const { translateFields } = require("./translator");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,7 +14,16 @@ app.use(
   express.raw({ type: "application/json" }),
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "5mb" }));
+
+// ── CORS for DatoCMS plugin ──
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 // ── Health check ──
 app.get("/health", (req, res) => {
@@ -179,14 +189,186 @@ app.get("/stats", async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════
+// ── TRANSLATION ENDPOINTS ──
+// ══════════════════════════════════════════════
+
+/**
+ * Translate fields from source locale to target locales.
+ * Used by the DatoCMS sidebar plugin.
+ *
+ * POST /translate
+ * Body: { fields: { title: "...", description: "..." }, sourceLocale: "pl-PL", targetLocales: ["en", "ru"], modelName: "apartment" }
+ * Returns: { en: { title: "...", description: "..." }, ru: { ... } }
+ */
+app.post("/translate", async (req, res) => {
+  const { fields, sourceLocale, targetLocales, modelName } = req.body;
+
+  if (!fields || !sourceLocale || !targetLocales) {
+    return res.status(400).json({ error: "Missing required fields: fields, sourceLocale, targetLocales" });
+  }
+
+  try {
+    console.log(`🌐 Translating ${Object.keys(fields).length} fields from ${sourceLocale} to ${targetLocales.join(", ")}${modelName ? ` (model: ${modelName})` : ""}`);
+    const translations = await translateFields(fields, sourceLocale, targetLocales, { modelName });
+    console.log(`✅ Translation complete`);
+    res.json(translations);
+  } catch (error) {
+    console.error(`❌ Translation failed:`, error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Bulk translate all records of a specific model (or all models).
+ *
+ * POST /bulk-translate
+ * Query params:
+ *   ?model=apartment        — only translate this model (item type API key)
+ *   ?overwrite=true         — overwrite existing translations
+ *   ?dry_run=true           — preview without changes
+ */
+app.post("/bulk-translate", async (req, res) => {
+  const modelFilter = req.query.model || null;
+  const overwrite = req.query.overwrite === "true";
+  const dryRun = req.query.dry_run === "true";
+
+  const locales = process.env.LOCALES.split(",").map((l) => l.trim());
+  const sourceLocale = locales[0]; // pl-PL
+  const targetLocales = locales.slice(1); // [en, ru]
+
+  res.json({ status: "started", message: "Bulk translation initiated. Check server logs for progress." });
+
+  try {
+    const client = getDatocmsClient();
+
+    // Get all item types (models)
+    const itemTypes = await client.itemTypes.list();
+    const modelsToProcess = modelFilter
+      ? itemTypes.filter((m) => m.api_key === modelFilter)
+      : itemTypes;
+
+    console.log(`\n🌐 Bulk translate: ${modelsToProcess.length} models, source=${sourceLocale}, targets=${targetLocales.join(",")}`);
+
+    let totalProcessed = 0;
+    let totalSkipped = 0;
+    let totalErrors = 0;
+
+    for (const model of modelsToProcess) {
+      // Get fields for this model
+      const fields = await client.fields.list(model.id);
+
+      // Find localized text/string fields
+      const localizedFields = fields.filter(
+        (f) => f.localized && ["string", "text", "seo", "structured_text"].includes(f.field_type),
+      );
+
+      if (localizedFields.length === 0) {
+        console.log(`  ⏭️  ${model.api_key}: no localized text fields`);
+        continue;
+      }
+
+      console.log(`\n📋 Model: ${model.api_key} (${localizedFields.length} localized fields)`);
+
+      // Get all records for this model
+      const records = [];
+      for await (const record of client.items.listPagedIterator({
+        filter: { type: model.api_key },
+        per_page: 100,
+        nested: true,
+      })) {
+        records.push(record);
+      }
+
+      console.log(`   ${records.length} records found`);
+
+      for (const record of records) {
+        // Extract source locale values for localized fields
+        const sourceFields = {};
+        let needsTranslation = false;
+
+        for (const field of localizedFields) {
+          const fieldValue = record[field.api_key];
+          if (!fieldValue || typeof fieldValue !== "object") continue;
+
+          const sourceText = fieldValue[sourceLocale];
+          if (!sourceText || (typeof sourceText === "string" && !sourceText.trim())) continue;
+
+          // Check if target locales need translation
+          const targetsMissing = targetLocales.some((l) => {
+            const val = fieldValue[l];
+            return !val || (typeof val === "string" && !val.trim());
+          });
+
+          if (targetsMissing || overwrite) {
+            // Only translate string/text fields (skip structured_text and seo for now in bulk)
+            if (typeof sourceText === "string") {
+              sourceFields[field.api_key] = sourceText;
+              needsTranslation = true;
+            }
+          }
+        }
+
+        if (!needsTranslation) {
+          totalSkipped++;
+          continue;
+        }
+
+        if (dryRun) {
+          console.log(`   [DRY RUN] Would translate record ${record.id}: ${Object.keys(sourceFields).join(", ")}`);
+          totalProcessed++;
+          continue;
+        }
+
+        try {
+          const translations = await translateFields(sourceFields, sourceLocale, targetLocales, { modelName: model.api_key });
+
+          // Build update payload
+          const updatePayload = {};
+          for (const field of localizedFields) {
+            if (!sourceFields[field.api_key]) continue;
+
+            const currentValue = record[field.api_key] || {};
+            const updatedValue = { ...currentValue };
+
+            for (const locale of targetLocales) {
+              if (translations[locale] && translations[locale][field.api_key]) {
+                updatedValue[locale] = translations[locale][field.api_key];
+              }
+            }
+
+            updatePayload[field.api_key] = updatedValue;
+          }
+
+          await client.items.update(record.id, updatePayload);
+          totalProcessed++;
+          console.log(`   ✅ [${totalProcessed}] Record ${record.id}`);
+
+          // Rate limit
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        } catch (error) {
+          totalErrors++;
+          console.error(`   ❌ Record ${record.id}: ${error.message}`);
+        }
+      }
+    }
+
+    console.log(`\n📊 Bulk translate complete: ${totalProcessed} translated, ${totalSkipped} skipped, ${totalErrors} errors`);
+  } catch (error) {
+    console.error("❌ Bulk translation failed:", error.message);
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`\n🚀 DatoCMS ALT Generator running on port ${PORT}`);
+  console.log(`\n🚀 DatoCMS ALT Generator + Translator running on port ${PORT}`);
   console.log(`   Locales: ${process.env.LOCALES}`);
   console.log(`   Context: ${process.env.BUSINESS_CONTEXT}`);
   console.log(`\n📡 Endpoints:`);
-  console.log(`   POST /webhook              — DatoCMS webhook`);
-  console.log(`   POST /generate/:id         — Single asset`);
-  console.log(`   POST /bulk-generate        — All assets`);
-  console.log(`   GET  /stats                — Coverage stats`);
+  console.log(`   POST /webhook              — DatoCMS webhook (ALT gen)`);
+  console.log(`   POST /generate/:id         — Single asset ALT`);
+  console.log(`   POST /bulk-generate        — Bulk ALT generation`);
+  console.log(`   GET  /stats                — ALT coverage stats`);
+  console.log(`   POST /translate            — Translate fields (for sidebar plugin)`);
+  console.log(`   POST /bulk-translate       — Bulk translate records`);
   console.log(`   GET  /health               — Health check\n`);
 });
