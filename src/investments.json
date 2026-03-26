@@ -1,0 +1,32 @@
+[
+  {
+    "keywords": ["inverso"],
+    "name": "Osiedle Inverso",
+    "type": "wielorodzinna",
+    "description": "blok mieszkalny, mieszkania od dewelopera",
+    "location": "Ursus, Warszawa",
+    "seo_pl": "nowe mieszkania Ursus Warszawa, blok mieszkalny od dewelopera",
+    "seo_en": "new apartments Ursus Warsaw, residential apartment building",
+    "seo_ru": "новые квартиры Урсус Варшава, многоквартирный жилой дом"
+  },
+  {
+    "keywords": ["stasinek"],
+    "name": "Osiedle Stasinek",
+    "type": "segmentowa",
+    "description": "domy segmentowe, osiedle domów",
+    "location": "Białołęka, Warszawa",
+    "seo_pl": "domy segmentowe Białołęka Warszawa, osiedle domów od dewelopera",
+    "seo_en": "townhouses Białołęka Warsaw, semi-detached houses development",
+    "seo_ru": "таунхаусы Бялолэка Варшава, сегментные дома от застройщика"
+  },
+  {
+    "keywords": ["bursztynowa"],
+    "name": "Osiedle przy Bursztynowej",
+    "type": "wielorodzinna",
+    "description": "blok mieszkalny, mieszkania od dewelopera",
+    "location": "Łowicz",
+    "seo_pl": "nowe mieszkania Łowicz, blok mieszkalny od dewelopera",
+    "seo_en": "new apartments Łowicz, residential apartment building",
+    "seo_ru": "новые квартиры Лович, многоквартирный жилой дом"
+  }
+]

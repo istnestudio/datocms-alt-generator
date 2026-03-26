@@ -1,6 +1,7 @@
 const { getUpload, updateUploadAlt } = require("./datocms-client");
 const { generateAltTexts } = require("./claude-vision");
 const { extractVideoThumbnail, isVideo, isSupportedMedia } = require("./video-handler");
+const { buildInvestmentContext } = require("./investment-matcher");
 const Anthropic = require("@anthropic-ai/sdk");
 
 /**
@@ -118,20 +119,17 @@ async function generateAltTextsFromBase64(base64Image, locales, filename, mediaT
     .map((l) => `"${l}" (${localeNames[l] || l})`)
     .join(", ");
 
+  const investmentContext = buildInvestmentContext(filename);
+
   const systemPrompt = `You are an expert accessibility and SEO specialist generating ALT texts for videos on a residential real estate developer website.
 
 BUSINESS CONTEXT: ${context}
-
-KNOWN INVESTMENT PROJECTS (use when recognized from filename or video content):
-- "Inverso" or "inverso" → Osiedle Inverso, nowe mieszkania od dewelopera, Ursus, Warszawa
-- "Stasinek" or "stasinek" → Osiedle Stasinek, domy segmentowe, Białołęka, Warszawa
-- "Bursztynowa" or "bursztynowa" → Osiedle przy Bursztynowej, nowe mieszkania, Łowicz
-
+${investmentContext}
 RULES FOR ALT TEXT:
 1. Be descriptive but concise (80-150 characters ideally, max 200 characters)
 2. Describe what is visually present in the video frame
 3. Include SEO keywords naturally ONLY when they match the visual content
-4. If the filename contains a project name, include it and its location
+4. If an investment was matched from the filename, ALWAYS use its correct name, type and location. Trust the investment data over visual appearance.
 5. For building exteriors: mention building type, architectural style, surroundings
 6. For interiors: mention room type, features, finishes
 7. Do NOT start with "Image of...", "Video of..." — describe the content directly
