@@ -874,13 +874,21 @@
     // Render the sidebar panel UI
     renderItemFormSidebarPanel(sidebarPaneId, ctx) {
       const container = document.getElementById("root");
-      if (!container) return;
-      console.log("[AI Translator] ctx.plugin.attributes.parameters:", ctx.plugin.attributes.parameters);
-      console.log("[AI Translator] ctx.site.attributes.locales:", ctx.site.attributes.locales);
-      console.log("[AI Translator] ctx.fields:", ctx.fields);
-      console.log("[AI Translator] ctx.formValues:", ctx.formValues);
-      const serverUrl = (ctx.plugin.attributes.parameters.translationServerUrl || "").replace(/\/$/, "");
-      const locales = ctx.site.attributes.locales;
+      if (!container) {
+        document.body.innerHTML = '<div style="color:red;padding:16px;">Brak elementu #root</div>';
+        return;
+      }
+      let serverUrl = "";
+      try {
+        const params = ctx.plugin && ctx.plugin.attributes && ctx.plugin.attributes.parameters || {};
+        serverUrl = (params.translationServerUrl || "").replace(/\/$/, "");
+      } catch (e) {
+      }
+      let locales = ["pl-PL", "en", "ru"];
+      try {
+        locales = ctx.site.attributes.locales || locales;
+      } catch (e) {
+      }
       const sourceLocale = locales[0];
       const targetLocales = locales.slice(1);
       container.innerHTML = `
@@ -905,6 +913,7 @@
         .status-info { background: #eff6ff; color: #1e40af; }
         .status-success { background: #f0fdf4; color: #166534; }
         .status-error { background: #fef2f2; color: #991b1b; }
+        .status-debug { background: #fefce8; color: #854d0e; font-family: monospace; font-size: 11px; white-space: pre-wrap; }
         .spinner {
           display: inline-block; width: 16px; height: 16px;
           border: 2px solid rgba(255,255,255,0.3); border-top-color: white;
@@ -912,70 +921,87 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
         .field-count { margin-top: 8px; font-size: 12px; color: #94a3b8; text-align: center; }
+        .server-url { margin-top: 4px; font-size: 11px; color: #94a3b8; text-align: center; word-break: break-all; }
       </style>
       <div id="translator-root">
         <button class="btn btn-primary" id="translateBtn">Przet\u0142umacz na EN + RU</button>
         <button class="btn btn-secondary" id="translateOverwriteBtn">Nadpisz istniej\u0105ce t\u0142umaczenia</button>
         <div class="field-count" id="fieldCount"></div>
+        <div class="server-url" id="serverInfo"></div>
         <div id="statusContainer"></div>
       </div>
     `;
+      const serverInfo = document.getElementById("serverInfo");
+      if (serverUrl) {
+        serverInfo.textContent = "Serwer: " + serverUrl;
+      } else {
+        serverInfo.innerHTML = '<span style="color:#dc2626;">\u26A0 Brak URL serwera w ustawieniach pluginu</span>';
+      }
       function getFormFields() {
         const fields = {};
-        for (const field of Object.values(ctx.fields)) {
-          const attrs = field.attributes;
-          if (!attrs.localized) continue;
-          if (!["string", "text"].includes(attrs.field_type)) continue;
-          const apiKey = attrs.api_key;
-          let value = null;
-          if (ctx.formValues && ctx.formValues[apiKey]) {
-            const formVal = ctx.formValues[apiKey];
-            if (typeof formVal === "object" && formVal !== null) {
-              value = formVal[sourceLocale];
-            } else if (typeof formVal === "string") {
-              value = formVal;
-            }
-          }
-          if (!value && typeof ctx.getFieldValue === "function") {
+        try {
+          const allFields = ctx.fields || {};
+          for (const field of Object.values(allFields)) {
+            const attrs = field.attributes || {};
+            if (!attrs.localized) continue;
+            if (!["string", "text"].includes(attrs.field_type)) continue;
+            const apiKey = attrs.api_key;
+            let value = null;
             try {
-              const dotVal = ctx.getFieldValue(apiKey + "." + sourceLocale);
-              if (typeof dotVal === "string") value = dotVal;
-            } catch (e) {
-            }
-          }
-          if (!value && typeof ctx.getFieldValue === "function") {
-            try {
-              const fullVal = ctx.getFieldValue(apiKey);
-              if (typeof fullVal === "object" && fullVal !== null) {
-                value = fullVal[sourceLocale];
-              } else if (typeof fullVal === "string") {
-                value = fullVal;
+              const fv = ctx.formValues || {};
+              if (fv[apiKey]) {
+                const formVal = fv[apiKey];
+                if (typeof formVal === "object" && formVal !== null) {
+                  value = formVal[sourceLocale];
+                } else if (typeof formVal === "string") {
+                  value = formVal;
+                }
               }
             } catch (e) {
             }
+            if (!value) {
+              try {
+                const v = ctx.getFieldValue(apiKey + "." + sourceLocale);
+                if (typeof v === "string") value = v;
+              } catch (e) {
+              }
+            }
+            if (!value) {
+              try {
+                const v = ctx.getFieldValue(apiKey);
+                if (typeof v === "object" && v !== null) value = v[sourceLocale];
+                else if (typeof v === "string") value = v;
+              } catch (e) {
+              }
+            }
+            if (value && typeof value === "string" && value.trim()) {
+              fields[apiKey] = value;
+            }
           }
-          if (value && typeof value === "string" && value.trim()) {
-            fields[apiKey] = value;
-          }
+        } catch (e) {
+          setStatus("B\u0142\u0105d odczytu p\xF3l: " + e.message, "error");
         }
-        console.log("[AI Translator] getFormFields result:", fields);
         return fields;
       }
       function updateFieldCount() {
-        const fields = getFormFields();
-        const count = Object.keys(fields).length;
-        const el = document.getElementById("fieldCount");
-        if (el) {
-          el.textContent = count > 0 ? `${count} p\xF3l do przet\u0142umaczenia` : "Brak p\xF3l z polsk\u0105 tre\u015Bci\u0105";
+        try {
+          const fields = getFormFields();
+          const count = Object.keys(fields).length;
+          const el = document.getElementById("fieldCount");
+          if (el) {
+            el.textContent = count > 0 ? count + " p\xF3l do przet\u0142umaczenia" : "Brak p\xF3l z polsk\u0105 tre\u015Bci\u0105";
+          }
+        } catch (e) {
         }
       }
-      function setStatus(message, type = "info") {
-        const c = document.getElementById("statusContainer");
-        if (c) c.innerHTML = `<div class="status status-${type}">${message}</div>`;
+      function setStatus(message, type) {
+        type = type || "info";
+        var c = document.getElementById("statusContainer");
+        if (c) c.innerHTML = '<div class="status status-' + type + '">' + message + "</div>";
       }
       function setLoading(loading) {
-        const btn = document.getElementById("translateBtn");
-        const btn2 = document.getElementById("translateOverwriteBtn");
+        var btn = document.getElementById("translateBtn");
+        var btn2 = document.getElementById("translateOverwriteBtn");
         if (loading) {
           btn.disabled = true;
           btn2.disabled = true;
@@ -986,27 +1012,26 @@
           btn.innerHTML = "Przet\u0142umacz na EN + RU";
         }
       }
-      async function handleTranslate(overwrite = false) {
-        console.log("[AI Translator] handleTranslate called, overwrite:", overwrite);
-        console.log("[AI Translator] serverUrl:", serverUrl);
-        if (!serverUrl) {
-          setStatus(
-            "Skonfiguruj URL serwera w ustawieniach pluginu (translationServerUrl)",
-            "error"
-          );
-          return;
-        }
-        const fields = getFormFields();
-        if (Object.keys(fields).length === 0) {
-          setStatus("Brak p\xF3l z polsk\u0105 tre\u015Bci\u0105 do przet\u0142umaczenia", "error");
-          return;
-        }
-        const modelName = ctx.itemType.attributes.api_key;
-        console.log("[AI Translator] Translating fields:", fields, "model:", modelName);
-        setLoading(true);
-        setStatus(`T\u0142umaczenie ${Object.keys(fields).length} p\xF3l...`, "info");
+      function handleTranslate(overwrite) {
+        setStatus("Rozpoczynam...", "info");
         try {
-          const response = await fetch(`${serverUrl}/translate`, {
+          if (!serverUrl) {
+            setStatus("Skonfiguruj translationServerUrl w Settings \u2192 Plugins \u2192 AI Translator \u2192 Parameters", "error");
+            return;
+          }
+          var fields = getFormFields();
+          if (Object.keys(fields).length === 0) {
+            setStatus("Brak p\xF3l z polsk\u0105 tre\u015Bci\u0105 do przet\u0142umaczenia", "error");
+            return;
+          }
+          var modelName = "unknown";
+          try {
+            modelName = ctx.itemType.attributes.api_key;
+          } catch (e) {
+          }
+          setLoading(true);
+          setStatus("T\u0142umaczenie " + Object.keys(fields).length + " p\xF3l...", "info");
+          fetch(serverUrl + "/translate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1015,72 +1040,72 @@
               targetLocales,
               modelName
             })
-          });
-          if (!response.ok) {
-            const errData = await response.json().catch(() => ({}));
-            throw new Error(errData.error || `Server error: ${response.status}`);
-          }
-          const translations = await response.json();
-          console.log("[AI Translator] Got translations:", translations);
-          let filledCount = 0;
-          for (const locale of targetLocales) {
-            if (!translations[locale]) continue;
-            for (const [fieldApiKey, translatedValue] of Object.entries(
-              translations[locale]
-            )) {
-              if (!translatedValue) continue;
-              let existingValue = null;
-              try {
-                const dotVal = ctx.getFieldValue(fieldApiKey + "." + locale);
-                if (typeof dotVal === "string") existingValue = dotVal;
-              } catch (e) {
-              }
-              if (!existingValue) {
+          }).then(function(response) {
+            if (!response.ok) {
+              return response.json().catch(function() {
+                return {};
+              }).then(function(errData) {
+                throw new Error(errData.error || "Server error: " + response.status);
+              });
+            }
+            return response.json();
+          }).then(function(translations) {
+            var filledCount = 0;
+            targetLocales.forEach(function(locale) {
+              if (!translations[locale]) return;
+              Object.keys(translations[locale]).forEach(function(fieldApiKey) {
+                var translatedValue = translations[locale][fieldApiKey];
+                if (!translatedValue) return;
+                var existingValue = null;
                 try {
-                  const fullVal = ctx.getFieldValue(fieldApiKey);
-                  if (typeof fullVal === "object" && fullVal !== null) {
-                    existingValue = fullVal[locale];
-                  }
+                  existingValue = ctx.getFieldValue(fieldApiKey + "." + locale);
                 } catch (e) {
                 }
-              }
-              if (existingValue && existingValue.trim() && !overwrite) {
-                continue;
-              }
-              try {
-                ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
-                filledCount++;
-              } catch (e) {
-                console.warn("[AI Translator] dot notation setFieldValue failed, trying full object", e);
-                try {
-                  const currentVal = ctx.getFieldValue(fieldApiKey) || {};
-                  ctx.setFieldValue(fieldApiKey, {
-                    ...currentVal,
-                    [locale]: translatedValue
-                  });
-                  filledCount++;
-                } catch (e2) {
-                  console.error("[AI Translator] setFieldValue failed for", fieldApiKey, locale, e2);
+                if (!existingValue) {
+                  try {
+                    var fv = ctx.formValues || {};
+                    if (fv[fieldApiKey] && typeof fv[fieldApiKey] === "object") {
+                      existingValue = fv[fieldApiKey][locale];
+                    }
+                  } catch (e) {
+                  }
                 }
-              }
-            }
-          }
-          setStatus(
-            `\u2705 Przet\u0142umaczono! Wype\u0142niono ${filledCount} p\xF3l. Kliknij "Save" aby zapisa\u0107.`,
-            "success"
-          );
-        } catch (error) {
-          console.error("[AI Translator] Translation error:", error);
-          setStatus(`\u274C B\u0142\u0105d: ${error.message}`, "error");
-        } finally {
+                if (existingValue && String(existingValue).trim() && !overwrite) return;
+                try {
+                  ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
+                  filledCount++;
+                } catch (e) {
+                  try {
+                    var current = ctx.getFieldValue(fieldApiKey) || {};
+                    current[locale] = translatedValue;
+                    ctx.setFieldValue(fieldApiKey, current);
+                    filledCount++;
+                  } catch (e2) {
+                    setStatus("B\u0142\u0105d zapisu pola " + fieldApiKey + ": " + e2.message, "error");
+                  }
+                }
+              });
+            });
+            setStatus("\u2705 Przet\u0142umaczono! Wype\u0142niono " + filledCount + " p\xF3l. Kliknij Save aby zapisa\u0107.", "success");
+          }).catch(function(error) {
+            setStatus("\u274C B\u0142\u0105d: " + error.message, "error");
+          }).finally(function() {
+            setLoading(false);
+          });
+        } catch (e) {
+          setStatus("\u274C Wyj\u0105tek: " + e.message, "error");
           setLoading(false);
         }
       }
-      document.getElementById("translateBtn").addEventListener("click", () => handleTranslate(false));
-      document.getElementById("translateOverwriteBtn").addEventListener("click", () => handleTranslate(true));
+      document.getElementById("translateBtn").addEventListener("click", function() {
+        handleTranslate(false);
+      });
+      document.getElementById("translateOverwriteBtn").addEventListener("click", function() {
+        handleTranslate(true);
+      });
       updateFieldCount();
       return {
-        destroy() {
+        destroy: function() {
           container.innerHTML = "";
         }
       };
