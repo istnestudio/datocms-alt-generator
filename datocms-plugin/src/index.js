@@ -17,6 +17,12 @@ connect({
     const container = document.getElementById("root");
     if (!container) return;
 
+    // Debug: log ctx structure to help troubleshoot
+    console.log("[AI Translator] ctx.plugin.attributes.parameters:", ctx.plugin.attributes.parameters);
+    console.log("[AI Translator] ctx.site.attributes.locales:", ctx.site.attributes.locales);
+    console.log("[AI Translator] ctx.fields:", ctx.fields);
+    console.log("[AI Translator] ctx.formValues:", ctx.formValues);
+
     const serverUrl = (
       ctx.plugin.attributes.parameters.translationServerUrl || ""
     ).replace(/\/$/, "");
@@ -43,7 +49,7 @@ connect({
         .btn-secondary { background: #f1f5f9; color: #475569; margin-top: 8px; }
         .btn-secondary:hover { background: #e2e8f0; }
         .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
-        .status { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; line-height: 1.4; }
+        .status { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; line-height: 1.4; word-break: break-word; }
         .status-info { background: #eff6ff; color: #1e40af; }
         .status-success { background: #f0fdf4; color: #166534; }
         .status-error { background: #fef2f2; color: #991b1b; }
@@ -64,24 +70,64 @@ connect({
     `;
 
     // ── Helper: get localized text fields with Polish content ──
+    // In SDK v2, ctx.formValues has the raw form data
+    // For localized fields: ctx.formValues[apiKey] = { "pl-PL": "...", "en": "...", "ru": "..." }
     function getFormFields() {
       const fields = {};
-      for (const field of Object.values(ctx.fields)) {
-        if (!field.attributes.localized) continue;
-        const fieldType = field.attributes.field_type;
-        if (!["string", "text"].includes(fieldType)) continue;
 
-        const apiKey = field.attributes.api_key;
-        const value = ctx.getFieldValue(apiKey + "." + sourceLocale);
+      for (const field of Object.values(ctx.fields)) {
+        const attrs = field.attributes;
+        if (!attrs.localized) continue;
+        if (!["string", "text"].includes(attrs.field_type)) continue;
+
+        const apiKey = attrs.api_key;
+
+        // Try multiple ways to get the value (SDK v2 compatibility)
+        let value = null;
+
+        // Method 1: formValues (localized fields are objects)
+        if (ctx.formValues && ctx.formValues[apiKey]) {
+          const formVal = ctx.formValues[apiKey];
+          if (typeof formVal === "object" && formVal !== null) {
+            value = formVal[sourceLocale];
+          } else if (typeof formVal === "string") {
+            value = formVal;
+          }
+        }
+
+        // Method 2: getFieldValue with dot notation
+        if (!value && typeof ctx.getFieldValue === "function") {
+          try {
+            const dotVal = ctx.getFieldValue(apiKey + "." + sourceLocale);
+            if (typeof dotVal === "string") value = dotVal;
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        // Method 3: getFieldValue returns localized object
+        if (!value && typeof ctx.getFieldValue === "function") {
+          try {
+            const fullVal = ctx.getFieldValue(apiKey);
+            if (typeof fullVal === "object" && fullVal !== null) {
+              value = fullVal[sourceLocale];
+            } else if (typeof fullVal === "string") {
+              value = fullVal;
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
 
         if (value && typeof value === "string" && value.trim()) {
           fields[apiKey] = value;
         }
       }
+
+      console.log("[AI Translator] getFormFields result:", fields);
       return fields;
     }
 
-    // ── Update field count ──
     function updateFieldCount() {
       const fields = getFormFields();
       const count = Object.keys(fields).length;
@@ -115,6 +161,9 @@ connect({
 
     // ── Main translate handler ──
     async function handleTranslate(overwrite = false) {
+      console.log("[AI Translator] handleTranslate called, overwrite:", overwrite);
+      console.log("[AI Translator] serverUrl:", serverUrl);
+
       if (!serverUrl) {
         setStatus(
           "Skonfiguruj URL serwera w ustawieniach pluginu (translationServerUrl)",
@@ -130,6 +179,7 @@ connect({
       }
 
       const modelName = ctx.itemType.attributes.api_key;
+      console.log("[AI Translator] Translating fields:", fields, "model:", modelName);
 
       setLoading(true);
       setStatus(`Tłumaczenie ${Object.keys(fields).length} pól...`, "info");
@@ -152,6 +202,7 @@ connect({
         }
 
         const translations = await response.json();
+        console.log("[AI Translator] Got translations:", translations);
 
         let filledCount = 0;
         for (const locale of targetLocales) {
@@ -162,15 +213,46 @@ connect({
           )) {
             if (!translatedValue) continue;
 
-            const existingValue = ctx.getFieldValue(
-              fieldApiKey + "." + locale
-            );
+            // Check existing value
+            let existingValue = null;
+            try {
+              const dotVal = ctx.getFieldValue(fieldApiKey + "." + locale);
+              if (typeof dotVal === "string") existingValue = dotVal;
+            } catch (e) {
+              // ignore
+            }
+            if (!existingValue) {
+              try {
+                const fullVal = ctx.getFieldValue(fieldApiKey);
+                if (typeof fullVal === "object" && fullVal !== null) {
+                  existingValue = fullVal[locale];
+                }
+              } catch (e) {
+                // ignore
+              }
+            }
+
             if (existingValue && existingValue.trim() && !overwrite) {
               continue;
             }
 
-            ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
-            filledCount++;
+            // Try setting with dot notation first, then full object
+            try {
+              ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
+              filledCount++;
+            } catch (e) {
+              console.warn("[AI Translator] dot notation setFieldValue failed, trying full object", e);
+              try {
+                const currentVal = ctx.getFieldValue(fieldApiKey) || {};
+                ctx.setFieldValue(fieldApiKey, {
+                  ...currentVal,
+                  [locale]: translatedValue,
+                });
+                filledCount++;
+              } catch (e2) {
+                console.error("[AI Translator] setFieldValue failed for", fieldApiKey, locale, e2);
+              }
+            }
           }
         }
 
@@ -179,7 +261,7 @@ connect({
           "success"
         );
       } catch (error) {
-        console.error("Translation error:", error);
+        console.error("[AI Translator] Translation error:", error);
         setStatus(`❌ Błąd: ${error.message}`, "error");
       } finally {
         setLoading(false);
