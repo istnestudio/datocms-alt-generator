@@ -269,6 +269,10 @@ app.post("/translate-record", async (req, res) => {
       (f) => f.localized && f.field_type === "seo",
     );
 
+    console.log(`📋 Fields found — text: ${localizedTextFields.length}, DAST: ${localizedDastFields.length}, SEO: ${localizedSeoFields.length}`);
+    console.log(`   DAST fields: ${localizedDastFields.map(f => f.api_key).join(", ") || "none"}`);
+    console.log(`   SEO fields: ${localizedSeoFields.map(f => f.api_key).join(", ") || "none"}`);
+
     const translatableCount = localizedTextFields.length + localizedDastFields.length + localizedSeoFields.length;
     if (translatableCount === 0) {
       return res.json({ status: "skipped", message: "No localized translatable fields in this model" });
@@ -300,9 +304,11 @@ app.post("/translate-record", async (req, res) => {
     const sourceDastFields = {};
     for (const field of localizedDastFields) {
       const fieldValue = record[field.api_key];
+      console.log(`   🔍 DAST field "${field.api_key}": fieldValue type=${typeof fieldValue}, isNull=${fieldValue === null}`);
       if (!fieldValue || typeof fieldValue !== "object") continue;
 
       const sourceDast = fieldValue[sourceLocale];
+      console.log(`   🔍 DAST "${field.api_key}" sourceLocale=${sourceLocale}: type=${typeof sourceDast}, hasChildren=${sourceDast?.children?.length || 0}, keys=${sourceDast ? Object.keys(sourceDast).join(",") : "null"}`);
       if (!sourceDast || !sourceDast.children || sourceDast.children.length === 0) continue;
 
       const targetsMissing = targetLocales.some((l) => {
@@ -319,9 +325,11 @@ app.post("/translate-record", async (req, res) => {
     const sourceSeoFields = {};
     for (const field of localizedSeoFields) {
       const fieldValue = record[field.api_key];
+      console.log(`   🔍 SEO field "${field.api_key}": fieldValue type=${typeof fieldValue}, isNull=${fieldValue === null}`);
       if (!fieldValue || typeof fieldValue !== "object") continue;
 
       const sourceSeo = fieldValue[sourceLocale];
+      console.log(`   🔍 SEO "${field.api_key}" sourceLocale=${sourceLocale}: ${sourceSeo ? JSON.stringify(sourceSeo).substring(0, 200) : "null"}`);
       if (!sourceSeo) continue;
 
       // Check if there's anything to translate (title or description)
