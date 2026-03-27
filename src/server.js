@@ -194,6 +194,31 @@ app.get("/stats", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
+// ── DEBUG: dump record structured text fields ──
+// ══════════════════════════════════════════════
+
+app.get("/debug-record/:recordId", async (req, res) => {
+  try {
+    const client = getDatocmsClient();
+    const record = await client.items.find(req.params.recordId);
+    const itemTypeId = record.item_type ? record.item_type.id : record.relationships?.item_type?.data?.id;
+    const fields = await client.fields.list(itemTypeId);
+    const dastFields = fields.filter(f => f.localized && f.field_type === "structured_text");
+
+    const result = {};
+    for (const field of dastFields) {
+      const val = record[field.api_key];
+      if (val && val["pl-PL"]) {
+        result[field.api_key] = val["pl-PL"];
+      }
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════
 // ── TRANSLATION ENDPOINTS ──
 // ══════════════════════════════════════════════
 
