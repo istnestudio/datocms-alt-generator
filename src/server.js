@@ -297,20 +297,39 @@ app.post("/translate-record", async (req, res) => {
       modelName: modelInfo.api_key,
     });
 
-    // Build update payload
+    // Build update payload — MUST include ALL localized fields when adding new locales
+    // DatoCMS requires every localized field to have a value (null is OK) for new locales
+    const allLocalizedFields = fields.filter((f) => f.localized);
     const updatePayload = {};
-    for (const field of localizedTextFields) {
-      if (!sourceFields[field.api_key]) continue;
 
-      const currentValue = record[field.api_key] || {};
-      const updatedValue = { ...currentValue };
+    for (const field of allLocalizedFields) {
+      const currentValue = record[field.api_key];
 
+      // For non-text fields or fields we didn't translate: just ensure all locales exist
+      if (!sourceFields[field.api_key]) {
+        if (currentValue && typeof currentValue === "object") {
+          const updated = { ...currentValue };
+          for (const locale of targetLocales) {
+            if (!(locale in updated)) {
+              updated[locale] = null;
+            }
+          }
+          updatePayload[field.api_key] = updated;
+        }
+        continue;
+      }
+
+      // For translated fields: fill in translations
+      const updatedValue = { ...(currentValue || {}) };
       for (const locale of targetLocales) {
         if (translations[locale] && translations[locale][field.api_key]) {
           if (!overwrite && updatedValue[locale] && String(updatedValue[locale]).trim()) {
+            // Keep existing translation, but ensure locale key exists
             continue;
           }
           updatedValue[locale] = translations[locale][field.api_key];
+        } else if (!(locale in updatedValue)) {
+          updatedValue[locale] = null;
         }
       }
 
@@ -439,20 +458,32 @@ app.post("/bulk-translate", async (req, res) => {
         try {
           const translations = await translateFields(sourceFields, sourceLocale, targetLocales, { modelName: model.api_key });
 
-          // Build update payload
+          // Build update payload — include ALL localized fields for new locale support
+          const allLocalized = fields.filter((f) => f.localized);
           const updatePayload = {};
-          for (const field of localizedFields) {
-            if (!sourceFields[field.api_key]) continue;
 
-            const currentValue = record[field.api_key] || {};
-            const updatedValue = { ...currentValue };
+          for (const field of allLocalized) {
+            const currentValue = record[field.api_key];
+            if (!sourceFields[field.api_key]) {
+              // Non-translated field: ensure all locales exist (null OK)
+              if (currentValue && typeof currentValue === "object") {
+                const updated = { ...currentValue };
+                for (const locale of targetLocales) {
+                  if (!(locale in updated)) updated[locale] = null;
+                }
+                updatePayload[field.api_key] = updated;
+              }
+              continue;
+            }
 
+            const updatedValue = { ...(currentValue || {}) };
             for (const locale of targetLocales) {
               if (translations[locale] && translations[locale][field.api_key]) {
                 updatedValue[locale] = translations[locale][field.api_key];
+              } else if (!(locale in updatedValue)) {
+                updatedValue[locale] = null;
               }
             }
-
             updatePayload[field.api_key] = updatedValue;
           }
 
