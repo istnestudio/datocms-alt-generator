@@ -865,32 +865,20 @@
       return [];
     },
     renderConfigScreen(ctx) {
-      const container = document.getElementById("root");
+      var container = document.getElementById("root");
       if (!container) return;
-      const params = ctx.plugin.attributes.parameters || {};
-      const currentUrl = params.translationServerUrl || "";
-      container.innerHTML = `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 16px; max-width: 500px;">
-        <h2 style="font-size: 18px; margin-bottom: 16px;">AI Translator \u2014 Ustawienia</h2>
-        <label style="display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px;">Translation Server URL</label>
-        <input id="serverUrlInput" type="text" value="${currentUrl}"
-          placeholder="https://datocms-alt-generator.onrender.com"
-          style="width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; box-sizing: border-box;" />
-        <p style="font-size: 12px; color: #64748b; margin-top: 6px;">URL serwera Render (bez uko\u015Bnika na ko\u0144cu)</p>
-        <button id="saveBtn"
-          style="margin-top: 16px; padding: 10px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;">Zapisz</button>
-        <div id="saveStatus" style="margin-top: 8px; font-size: 13px;"></div>
-      </div>
-    `;
+      var params = ctx.plugin.attributes.parameters || {};
+      var currentUrl = params.translationServerUrl || "";
+      container.innerHTML = '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:16px;max-width:500px;"><h2 style="font-size:18px;margin-bottom:16px;">AI Translator \u2014 Ustawienia</h2><label style="display:block;font-size:14px;font-weight:600;margin-bottom:6px;">Translation Server URL</label><input id="serverUrlInput" type="text" value="' + currentUrl + '" placeholder="https://datocms-alt-generator.onrender.com" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px;box-sizing:border-box;" /><p style="font-size:12px;color:#64748b;margin-top:6px;">URL serwera Render (bez uko\u015Bnika na ko\u0144cu)</p><button id="saveBtn" style="margin-top:16px;padding:10px 20px;background:#2563eb;color:white;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;">Zapisz</button><div id="saveStatus" style="margin-top:8px;font-size:13px;"></div></div>';
       document.getElementById("saveBtn").addEventListener("click", function() {
         var url = document.getElementById("serverUrlInput").value.replace(/\/$/, "");
-        ctx.updatePluginParameters({ ...params, translationServerUrl: url }).then(function() {
-          document.getElementById("saveStatus").innerHTML = '<span style="color: #16a34a;">\u2705 Zapisano!</span>';
+        ctx.updatePluginParameters(Object.assign({}, params, { translationServerUrl: url })).then(function() {
+          document.getElementById("saveStatus").innerHTML = '<span style="color:#16a34a;">\u2705 Zapisano!</span>';
         }).catch(function(e) {
-          document.getElementById("saveStatus").innerHTML = '<span style="color: #dc2626;">\u274C ' + e.message + "</span>";
+          document.getElementById("saveStatus").innerHTML = '<span style="color:#dc2626;">\u274C ' + e.message + "</span>";
         });
       });
-      return { destroy() {
+      return { destroy: function() {
         container.innerHTML = "";
       } };
     },
@@ -898,7 +886,7 @@
       return [{ id: "aiTranslator", label: "AI T\u0142umaczenie", startOpen: true }];
     },
     renderItemFormSidebarPanel(sidebarPaneId, ctx) {
-      const container = document.getElementById("root");
+      var container = document.getElementById("root");
       if (!container) return;
       var serverUrl = "https://datocms-alt-generator.onrender.com";
       try {
@@ -906,71 +894,14 @@
         if (p.translationServerUrl) serverUrl = p.translationServerUrl.replace(/\/$/, "");
       } catch (e) {
       }
-      var locales = ["pl-PL", "en", "ru"];
+      var recordId = null;
       try {
-        locales = ctx.site.attributes.locales || locales;
+        recordId = ctx.item && ctx.item.id;
       } catch (e) {
       }
-      var sourceLocale = locales[0];
-      var targetLocales = locales.slice(1);
-      container.innerHTML = `
-      <style>
-        #translator-root { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 0; color: #1a1a2e; }
-        .btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px 16px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-        .btn-primary { background: #2563eb; color: white; }
-        .btn-primary:hover { background: #1d4ed8; }
-        .btn-primary:disabled { background: #93c5fd; cursor: not-allowed; }
-        .btn-secondary { background: #f1f5f9; color: #475569; margin-top: 8px; }
-        .btn-secondary:hover { background: #e2e8f0; }
-        .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
-        .status { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5; word-break: break-word; }
-        .status-info { background: #eff6ff; color: #1e40af; }
-        .status-success { background: #f0fdf4; color: #166534; }
-        .status-error { background: #fef2f2; color: #991b1b; }
-        .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.6s linear infinite; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .field-count { margin-top: 8px; font-size: 12px; color: #94a3b8; text-align: center; }
-        .server-url { margin-top: 4px; font-size: 11px; color: #94a3b8; text-align: center; word-break: break-all; }
-      </style>
-      <div id="translator-root">
-        <button class="btn btn-primary" id="translateBtn">Przet\u0142umacz na EN + RU</button>
-        <button class="btn btn-secondary" id="translateOverwriteBtn">Nadpisz istniej\u0105ce t\u0142umaczenia</button>
-        <div class="field-count" id="fieldCount"></div>
-        <div class="server-url" id="serverInfo"></div>
-        <div id="statusContainer"></div>
-      </div>
-    `;
-      var serverInfo = document.getElementById("serverInfo");
-      serverInfo.textContent = serverUrl ? "Serwer: " + serverUrl : "\u26A0 Brak URL serwera";
-      function getFormFields() {
-        var fields = {};
-        try {
-          var allFields = ctx.fields || {};
-          for (var fieldId in allFields) {
-            var field = allFields[fieldId];
-            var attrs = field.attributes || {};
-            if (!attrs.localized) continue;
-            if (attrs.field_type !== "string" && attrs.field_type !== "text") continue;
-            var apiKey = attrs.api_key;
-            var formVal = ctx.formValues[apiKey];
-            if (formVal && typeof formVal === "object" && formVal[sourceLocale]) {
-              var val = formVal[sourceLocale];
-              if (typeof val === "string" && val.trim()) {
-                fields[apiKey] = val;
-              }
-            }
-          }
-        } catch (e) {
-          setStatus("B\u0142\u0105d odczytu p\xF3l: " + e.message, "error");
-        }
-        return fields;
-      }
-      function updateFieldCount() {
-        var fields = getFormFields();
-        var count = Object.keys(fields).length;
-        var el = document.getElementById("fieldCount");
-        if (el) el.textContent = count > 0 ? count + " p\xF3l do przet\u0142umaczenia" : "Brak p\xF3l z polsk\u0105 tre\u015Bci\u0105";
-      }
+      container.innerHTML = '<style>#translator-root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:0;color:#1a1a2e}.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px 16px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s}.btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}.btn-primary:disabled{background:#93c5fd;cursor:not-allowed}.btn-secondary{background:#f1f5f9;color:#475569;margin-top:8px}.btn-secondary:hover{background:#e2e8f0}.btn-secondary:disabled{opacity:.5;cursor:not-allowed}.status{margin-top:12px;padding:10px 12px;border-radius:6px;font-size:13px;line-height:1.5;word-break:break-word}.status-info{background:#eff6ff;color:#1e40af}.status-success{background:#f0fdf4;color:#166534}.status-error{background:#fef2f2;color:#991b1b}.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.meta{margin-top:8px;font-size:11px;color:#94a3b8;text-align:center;word-break:break-all}</style><div id="translator-root"><button class="btn btn-primary" id="translateBtn">Przet\u0142umacz na EN + RU</button><button class="btn btn-secondary" id="translateOverwriteBtn">Nadpisz istniej\u0105ce t\u0142umaczenia</button><div class="meta" id="metaInfo"></div><div id="statusContainer"></div></div>';
+      var metaEl = document.getElementById("metaInfo");
+      metaEl.textContent = recordId ? "Rekord: " + recordId + " | Serwer: " + serverUrl : "\u26A0 Nie mo\u017Cna odczyta\u0107 ID rekordu";
       function setStatus(msg, type) {
         var c = document.getElementById("statusContainer");
         if (c) c.innerHTML = '<div class="status status-' + (type || "info") + '">' + msg + "</div>";
@@ -978,95 +909,38 @@
       function setLoading(on) {
         var b1 = document.getElementById("translateBtn");
         var b2 = document.getElementById("translateOverwriteBtn");
-        b1.disabled = on;
-        b2.disabled = on;
-        b1.innerHTML = on ? '<span class="spinner"></span> T\u0142umaczenie...' : "Przet\u0142umacz na EN + RU";
+        if (b1) {
+          b1.disabled = on;
+          b1.innerHTML = on ? '<span class="spinner"></span> T\u0142umaczenie...' : "Przet\u0142umacz na EN + RU";
+        }
+        if (b2) b2.disabled = on;
       }
       async function handleTranslate(overwrite) {
-        setStatus("Rozpoczynam...", "info");
+        if (!serverUrl) {
+          setStatus("Brak URL serwera", "error");
+          return;
+        }
+        if (!recordId) {
+          setStatus("Nie mo\u017Cna odczyta\u0107 ID rekordu. Zapisz rekord i spr\xF3buj ponownie.", "error");
+          return;
+        }
+        setLoading(true);
+        setStatus("Wysy\u0142anie do serwera...", "info");
         try {
-          if (!serverUrl) {
-            setStatus("Brak URL serwera \u2014 skonfiguruj w Settings \u2192 Plugins", "error");
-            return;
-          }
-          var fields = getFormFields();
-          var fieldKeys = Object.keys(fields);
-          if (fieldKeys.length === 0) {
-            setStatus("Brak p\xF3l z polsk\u0105 tre\u015Bci\u0105 do przet\u0142umaczenia", "error");
-            return;
-          }
-          var modelName = "unknown";
-          try {
-            modelName = ctx.itemType.attributes.api_key;
-          } catch (e) {
-          }
-          setLoading(true);
-          setStatus("T\u0142umaczenie " + fieldKeys.length + " p\xF3l...", "info");
-          var response = await fetch(serverUrl + "/translate", {
+          var response = await fetch(serverUrl + "/translate-record", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              fields,
-              sourceLocale,
-              targetLocales,
-              modelName
-            })
+            body: JSON.stringify({ recordId, overwrite })
           });
+          var data = await response.json();
           if (!response.ok) {
-            var errData = {};
-            try {
-              errData = await response.json();
-            } catch (e) {
-            }
-            throw new Error(errData.error || "Server error: " + response.status);
+            throw new Error(data.error || "Server error: " + response.status);
           }
-          var translations = await response.json();
-          var debugLog = [];
-          var filledCount = 0;
-          for (var li = 0; li < targetLocales.length; li++) {
-            var locale = targetLocales[li];
-            if (!translations[locale]) {
-              debugLog.push("Brak t\u0142umacze\u0144 dla: " + locale);
-              continue;
-            }
-            var translatedFields = translations[locale];
-            for (var fi = 0; fi < fieldKeys.length; fi++) {
-              var fieldApiKey = fieldKeys[fi];
-              var translatedValue = translatedFields[fieldApiKey];
-              if (!translatedValue) {
-                debugLog.push(fieldApiKey + "." + locale + " = null");
-                continue;
-              }
-              var currentFormVal = ctx.formValues[fieldApiKey];
-              if (currentFormVal && typeof currentFormVal === "object") {
-                var existingVal = currentFormVal[locale];
-                if (existingVal && String(existingVal).trim() && !overwrite) {
-                  debugLog.push(fieldApiKey + "." + locale + " = istnieje, pomini\u0119to");
-                  continue;
-                }
-              }
-              var setPath = fieldApiKey + "." + locale;
-              try {
-                await ctx.setFieldValue(setPath, translatedValue);
-                filledCount++;
-                debugLog.push(fieldApiKey + "." + locale + " = \u2705 OK");
-              } catch (e1) {
-                debugLog.push(fieldApiKey + "." + locale + " setFieldValue err: " + e1.message);
-                try {
-                  var fullObj = Object.assign({}, ctx.formValues[fieldApiKey] || {});
-                  fullObj[locale] = translatedValue;
-                  await ctx.setFieldValue(fieldApiKey, fullObj);
-                  filledCount++;
-                  debugLog.push(fieldApiKey + "." + locale + " = \u2705 OK (fallback)");
-                } catch (e2) {
-                  debugLog.push(fieldApiKey + "." + locale + " FALLBACK err: " + e2.message);
-                }
-              }
-            }
+          if (data.status === "skipped") {
+            setStatus("\u23ED " + data.message, "info");
+          } else {
+            setStatus("\u2705 " + data.message + "<br>Od\u015Bwie\u017C stron\u0119 (F5) aby zobaczy\u0107 t\u0142umaczenia.", "success");
           }
-          var msg = filledCount > 0 ? "\u2705 Wype\u0142niono " + filledCount + " p\xF3l. Kliknij Save aby zapisa\u0107." : "\u26A0 Nie wype\u0142niono \u017Cadnych p\xF3l.";
-          msg += "<br><br><b>Debug:</b><br>" + debugLog.join("<br>");
-          setStatus(msg, filledCount > 0 ? "success" : "error");
         } catch (e) {
           setStatus("\u274C B\u0142\u0105d: " + e.message, "error");
         } finally {
@@ -1079,8 +953,7 @@
       document.getElementById("translateOverwriteBtn").addEventListener("click", function() {
         handleTranslate(true);
       });
-      updateFieldCount();
-      return { destroy() {
+      return { destroy: function() {
         container.innerHTML = "";
       } };
     }

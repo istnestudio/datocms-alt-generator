@@ -224,6 +224,118 @@ app.post("/translate", async (req, res) => {
 });
 
 /**
+ * Translate a single record by ID and save directly to DatoCMS.
+ * Used by the sidebar plugin — most reliable approach.
+ *
+ * POST /translate-record
+ * Body: { recordId: "abc123", overwrite: false }
+ */
+app.post("/translate-record", async (req, res) => {
+  const { recordId, overwrite } = req.body;
+
+  if (!recordId) {
+    return res.status(400).json({ error: "Missing recordId" });
+  }
+
+  const locales = process.env.LOCALES.split(",").map((l) => l.trim());
+  const sourceLocale = locales[0];
+  const targetLocales = locales.slice(1);
+
+  try {
+    const client = getDatocmsClient();
+
+    // Fetch the record
+    const record = await client.items.find(recordId);
+    if (!record) {
+      return res.status(404).json({ error: "Record not found" });
+    }
+
+    // Get the model's fields
+    const itemTypeId = record.item_type ? record.item_type.id : record.relationships?.item_type?.data?.id;
+    if (!itemTypeId) {
+      return res.status(400).json({ error: "Cannot determine item type" });
+    }
+
+    const fields = await client.fields.list(itemTypeId);
+    const localizedTextFields = fields.filter(
+      (f) => f.localized && ["string", "text"].includes(f.field_type),
+    );
+
+    if (localizedTextFields.length === 0) {
+      return res.json({ status: "skipped", message: "No localized text fields in this model" });
+    }
+
+    // Extract source locale values
+    const sourceFields = {};
+    for (const field of localizedTextFields) {
+      const fieldValue = record[field.api_key];
+      if (!fieldValue || typeof fieldValue !== "object") continue;
+
+      const sourceText = fieldValue[sourceLocale];
+      if (!sourceText || typeof sourceText !== "string" || !sourceText.trim()) continue;
+
+      // Check if target locales need translation
+      const targetsMissing = targetLocales.some((l) => {
+        const val = fieldValue[l];
+        return !val || (typeof val === "string" && !val.trim());
+      });
+
+      if (targetsMissing || overwrite) {
+        sourceFields[field.api_key] = sourceText;
+      }
+    }
+
+    if (Object.keys(sourceFields).length === 0) {
+      return res.json({ status: "skipped", message: "All fields already translated", translated: 0 });
+    }
+
+    console.log(`🌐 Translating record ${recordId}: ${Object.keys(sourceFields).length} fields`);
+
+    // Translate
+    const modelInfo = await client.itemTypes.find(itemTypeId);
+    const translations = await translateFields(sourceFields, sourceLocale, targetLocales, {
+      modelName: modelInfo.api_key,
+    });
+
+    // Build update payload
+    const updatePayload = {};
+    for (const field of localizedTextFields) {
+      if (!sourceFields[field.api_key]) continue;
+
+      const currentValue = record[field.api_key] || {};
+      const updatedValue = { ...currentValue };
+
+      for (const locale of targetLocales) {
+        if (translations[locale] && translations[locale][field.api_key]) {
+          if (!overwrite && updatedValue[locale] && String(updatedValue[locale]).trim()) {
+            continue;
+          }
+          updatedValue[locale] = translations[locale][field.api_key];
+        }
+      }
+
+      updatePayload[field.api_key] = updatedValue;
+    }
+
+    // Save to DatoCMS
+    await client.items.update(recordId, updatePayload);
+
+    const translatedCount = Object.keys(updatePayload).length;
+    console.log(`✅ Record ${recordId}: ${translatedCount} fields translated and saved`);
+
+    res.json({
+      status: "ok",
+      translated: translatedCount,
+      fields: Object.keys(updatePayload),
+      message: `Przetłumaczono ${translatedCount} pól i zapisano do DatoCMS`,
+    });
+  } catch (error) {
+    console.error(`❌ translate-record ${recordId}:`, error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * Bulk translate all records of a specific model (or all models).
  *
  * POST /bulk-translate
