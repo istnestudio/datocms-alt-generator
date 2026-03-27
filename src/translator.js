@@ -175,14 +175,27 @@ async function translateFullDast(structuredText, sourceLocale, targetLocale, opt
 
   // 1. Translate document tree (spans in paragraphs, headings, etc.)
   if (translated.document && translated.document.children) {
+    // Remove block nodes from document — block records belong to the source locale
+    // and cannot be referenced from other locales. DatoCMS will reject unknown block IDs.
+    translated.document.children = translated.document.children.filter(
+      (child) => child.type !== "block"
+    );
+    console.log(`   📄 DAST doc: ${translated.document.children.length} children after removing block nodes`);
+
     await translateDastNode(translated.document, sourceLocale, targetLocale, options);
   }
 
-  // 2. Translate blocks
+  // 2. Translate blocks in the blocks array (if any inline blocks exist)
   if (translated.blocks && Array.isArray(translated.blocks)) {
     for (const block of translated.blocks) {
       await translateBlock(block, sourceLocale, targetLocale, options);
     }
+  }
+
+  // 3. Clear blocks array — block records from source locale don't belong to target
+  // (they reference pl-PL block IDs that DatoCMS rejects for en/ru)
+  if (translated.blocks) {
+    translated.blocks = [];
   }
 
   return translated;
@@ -374,6 +387,9 @@ async function translateStructuredTextField(structuredText, sourceLocale, target
  * @param {Object} options
  * @returns {Object} - { en: { title, description, image, twitter_card }, ru: { ... } }
  */
+const SEO_TITLE_MAX = 60;
+const SEO_DESCRIPTION_MAX = 160;
+
 async function translateSeoField(seoObj, sourceLocale, targetLocales, options = {}) {
   if (!seoObj) return {};
 
@@ -386,8 +402,13 @@ async function translateSeoField(seoObj, sourceLocale, targetLocales, options = 
       try {
         translated.title = await translateSingleField(
           seoObj.title, sourceLocale, targetLocale,
-          { ...options, fieldName: "seo_title" }
+          { ...options, fieldName: `seo_title (MAXIMUM ${SEO_TITLE_MAX} characters! Be concise.)` }
         );
+        // Hard truncate if still too long
+        if (translated.title && translated.title.length > SEO_TITLE_MAX) {
+          console.log(`  ✂️  SEO title ${targetLocale}: ${translated.title.length} → truncated to ${SEO_TITLE_MAX}`);
+          translated.title = translated.title.substring(0, SEO_TITLE_MAX - 1) + "…";
+        }
       } catch (e) {
         console.error(`  ⚠️  SEO title translate to ${targetLocale} failed: ${e.message}`);
       }
@@ -397,8 +418,13 @@ async function translateSeoField(seoObj, sourceLocale, targetLocales, options = 
       try {
         translated.description = await translateSingleField(
           seoObj.description, sourceLocale, targetLocale,
-          { ...options, fieldName: "seo_description" }
+          { ...options, fieldName: `seo_description (MAXIMUM ${SEO_DESCRIPTION_MAX} characters! Be concise.)` }
         );
+        // Hard truncate if still too long
+        if (translated.description && translated.description.length > SEO_DESCRIPTION_MAX) {
+          console.log(`  ✂️  SEO description ${targetLocale}: ${translated.description.length} → truncated to ${SEO_DESCRIPTION_MAX}`);
+          translated.description = translated.description.substring(0, SEO_DESCRIPTION_MAX - 1) + "…";
+        }
       } catch (e) {
         console.error(`  ⚠️  SEO description translate to ${targetLocale} failed: ${e.message}`);
       }

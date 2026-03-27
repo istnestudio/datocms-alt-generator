@@ -312,6 +312,16 @@ app.post("/translate-record", async (req, res) => {
       const doc = sourceDast?.document;
       const blocksCount = sourceDast?.blocks?.length || 0;
       console.log(`   🔍 DAST "${field.api_key}" sourceLocale=${sourceLocale}: keys=${sourceDast ? Object.keys(sourceDast).join(",") : "null"}, docChildren=${doc?.children?.length || 0}, blocks=${blocksCount}`);
+      // Debug: log block nodes in document tree and first block details
+      if (doc?.children) {
+        const blockNodes = doc.children.filter(c => c.type === "block");
+        if (blockNodes.length > 0) {
+          console.log(`   🔍 DAST "${field.api_key}": ${blockNodes.length} block nodes in document tree, first: ${JSON.stringify(blockNodes[0]).substring(0, 200)}`);
+        }
+        // Log unique child types
+        const types = [...new Set(doc.children.map(c => c.type))];
+        console.log(`   🔍 DAST "${field.api_key}" child types: ${types.join(", ")}`);
+      }
       if (!sourceDast || !doc || (!doc.children?.length && !blocksCount)) continue;
 
       const targetsMissing = targetLocales.some((l) => {
