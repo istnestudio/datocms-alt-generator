@@ -52,7 +52,7 @@ TRANSLATION RULES:
 8. If the source text is very short (1-3 words like a label or button), translate concisely.
 9. For SEO-relevant content (titles, descriptions), include natural SEO keywords in the target language.
 
-CRITICAL: Respond with ONLY the translated text. No quotes around it, no explanation, no prefix like "Translation:". Just the pure translated text.`;
+CRITICAL: Respond with ONLY the translated text. No quotes around it, no explanation, no prefix like "Translation:". Just the pure translated text. NEVER include "---" separators in your response.`;
 
   const userPrompt = `Translate the following ${sourceLang} text to ${targetLang}.${modelName ? ` This is the "${fieldName}" field in a "${modelName}" content type.` : ""}
 
@@ -77,7 +77,10 @@ ${text}
         .map((block) => block.text)
         .join("");
 
-      return responseText.trim();
+      // Strip any "---" separators that Claude might echo back from the prompt
+      let result = responseText.trim();
+      result = result.replace(/^---\n?/, "").replace(/\n?---$/, "").trim();
+      return result;
     } catch (error) {
       lastError = error;
       const status = error.status || error.statusCode || 0;
@@ -174,28 +177,22 @@ async function translateFullDast(structuredText, sourceLocale, targetLocale, opt
   const translated = deepClone(structuredText);
 
   // 1. Translate document tree (spans in paragraphs, headings, etc.)
+  // Block nodes ({ type: "block", item: "ID" }) are KEPT — they reference shared
+  // block records that are the same across all locales.
   if (translated.document && translated.document.children) {
-    // Remove block nodes from document — block records belong to the source locale
-    // and cannot be referenced from other locales. DatoCMS will reject unknown block IDs.
-    translated.document.children = translated.document.children.filter(
-      (child) => child.type !== "block"
-    );
-    console.log(`   📄 DAST doc: ${translated.document.children.length} children after removing block nodes`);
+    const blockCount = translated.document.children.filter(c => c.type === "block").length;
+    const nonBlockCount = translated.document.children.length - blockCount;
+    console.log(`   📄 DAST doc: ${nonBlockCount} translatable nodes, ${blockCount} block references (kept)`);
 
     await translateDastNode(translated.document, sourceLocale, targetLocale, options);
   }
 
-  // 2. Translate blocks in the blocks array (if any inline blocks exist)
-  if (translated.blocks && Array.isArray(translated.blocks)) {
+  // 2. Translate inline blocks in the blocks array (if any exist in the ST value)
+  if (translated.blocks && Array.isArray(translated.blocks) && translated.blocks.length > 0) {
+    console.log(`   📦 DAST: ${translated.blocks.length} inline blocks to translate`);
     for (const block of translated.blocks) {
       await translateBlock(block, sourceLocale, targetLocale, options);
     }
-  }
-
-  // 3. Clear blocks array — block records from source locale don't belong to target
-  // (they reference pl-PL block IDs that DatoCMS rejects for en/ru)
-  if (translated.blocks) {
-    translated.blocks = [];
   }
 
   return translated;
