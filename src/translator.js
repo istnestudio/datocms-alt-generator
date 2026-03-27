@@ -67,24 +67,47 @@ CRITICAL: Respond with ONLY the translated text. No quotes around it, no explana
 ${text}
 ---`;
 
-  const message = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: [
-      {
-        role: "user",
-        content: userPrompt,
-      },
-    ],
-  });
+  // Retry logic for 529 Overloaded errors
+  const MAX_RETRIES = 3;
+  let lastError = null;
 
-  const responseText = message.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("");
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const message = await client.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: userPrompt,
+          },
+        ],
+      });
 
-  return responseText.trim();
+      const responseText = message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("");
+
+      return responseText.trim();
+    } catch (error) {
+      lastError = error;
+      const status = error.status || error.statusCode || 0;
+
+      // Retry on 529 (overloaded) and 429 (rate limit)
+      if ((status === 529 || status === 429) && attempt < MAX_RETRIES) {
+        const delay = attempt * 3000; // 3s, 6s, 9s
+        console.log(`  ⏳ API overloaded (${status}), retry ${attempt}/${MAX_RETRIES} in ${delay / 1000}s...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
 }
 
 /**
