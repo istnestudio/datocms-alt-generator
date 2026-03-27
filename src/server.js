@@ -262,9 +262,9 @@ app.post("/bulk-translate", async (req, res) => {
       // Get fields for this model
       const fields = await client.fields.list(model.id);
 
-      // Find localized text/string fields
+      // Find localized text/string fields ONLY (skip structured_text, seo, rich_text etc.)
       const localizedFields = fields.filter(
-        (f) => f.localized && ["string", "text", "seo", "structured_text"].includes(f.field_type),
+        (f) => f.localized && ["string", "text"].includes(f.field_type),
       );
 
       if (localizedFields.length === 0) {

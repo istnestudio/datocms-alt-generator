@@ -23,36 +23,23 @@ const LOCALE_NAMES = {
 };
 
 /**
- * Translate a set of fields from the source locale to target locales
+ * Translate a single text from source locale to a single target locale.
  *
- * @param {Object} fields - { fieldApiKey: "source text", ... }
+ * @param {string} text - Source text to translate
  * @param {string} sourceLocale - e.g. "pl-PL"
- * @param {string[]} targetLocales - e.g. ["en", "ru"]
+ * @param {string} targetLocale - e.g. "en"
  * @param {Object} options
- * @param {string} options.modelName - Name of the DatoCMS model for context
- * @returns {Object} - { en: { fieldApiKey: "translated", ... }, ru: { ... } }
+ * @param {string} options.modelName - DatoCMS model name for context
+ * @param {string} options.fieldName - Field API key for context
+ * @returns {string} - Translated text
  */
-async function translateFields(fields, sourceLocale, targetLocales, options = {}) {
+async function translateSingleField(text, sourceLocale, targetLocale, options = {}) {
   const client = getAnthropicClient();
-  const { modelName = "" } = options;
+  const { modelName = "", fieldName = "" } = options;
   const context = process.env.BUSINESS_CONTEXT || "";
 
   const sourceLang = LOCALE_NAMES[sourceLocale] || sourceLocale;
-  const targetList = targetLocales
-    .map((l) => `"${l}" (${LOCALE_NAMES[l] || l})`)
-    .join(", ");
-
-  // Build field list for the prompt
-  const fieldEntries = Object.entries(fields).filter(([, value]) => value && value.trim());
-  if (fieldEntries.length === 0) {
-    return {};
-  }
-
-  const fieldsJson = JSON.stringify(
-    Object.fromEntries(fieldEntries),
-    null,
-    2,
-  );
+  const targetLang = LOCALE_NAMES[targetLocale] || targetLocale;
 
   const systemPrompt = `You are a professional translator for a residential real estate developer website.
 
@@ -62,27 +49,23 @@ TRANSLATION RULES:
 1. Translate naturally and fluently — not word-by-word. Adapt to the target language's conventions.
 2. Preserve the original meaning, tone, and intent.
 3. Keep proper nouns unchanged: investment names (Inverso, Stasinek, Sfera, Bursztynowa), city names (Warszawa/Warsaw/Варшава), district names.
-4. For real estate terminology, use industry-standard terms in each language:
+4. For real estate terminology, use industry-standard terms:
    - "mieszkania od dewelopera" → EN: "developer apartments" / RU: "квартиры от застройщика"
-   - "domy segmentowe" → EN: "townhouses" or "semi-detached houses" / RU: "таунхаусы" or "сегментные дома"
-   - "osiedle" → EN: "housing estate" or "residential complex" / RU: "жилой комплекс" or "осиeдле"
-5. Keep HTML tags, markdown formatting, and structural elements intact.
+   - "domy segmentowe" → EN: "townhouses" or "semi-detached houses" / RU: "таунхаусы"
+   - "osiedle" → EN: "housing estate" or "residential complex" / RU: "жилой комплекс"
+5. Keep ALL HTML tags, markdown formatting, and structural elements EXACTLY as they are.
 6. Keep URLs, email addresses, and phone numbers unchanged.
-7. Preserve line breaks and paragraph structure.
+7. Preserve line breaks and paragraph structure exactly.
 8. If the source text is very short (1-3 words like a label or button), translate concisely.
 9. For SEO-relevant content (titles, descriptions), include natural SEO keywords in the target language.
 
-You MUST respond with ONLY valid JSON. No other text, no markdown, no code blocks.`;
+CRITICAL: Respond with ONLY the translated text. No quotes around it, no explanation, no prefix like "Translation:". Just the pure translated text.`;
 
-  const userPrompt = `Translate the following fields from ${sourceLang} (${sourceLocale}) to these languages: ${targetList}.
-${modelName ? `\nContent model: "${modelName}" (use this for context about what the fields represent)\n` : ""}
-Source fields (${sourceLang}):
-${fieldsJson}
+  const userPrompt = `Translate the following ${sourceLang} text to ${targetLang}.${modelName ? ` This is the "${fieldName}" field in a "${modelName}" content type.` : ""}
 
-Respond with ONLY a JSON object in this exact format:
-{
-${targetLocales.map((l) => `  "${l}": { ${fieldEntries.map(([key]) => `"${key}": "translated text in ${LOCALE_NAMES[l] || l}"`).join(", ")} }`).join(",\n")}
-}`;
+---
+${text}
+---`;
 
   const message = await client.messages.create({
     model: "claude-sonnet-4-20250514",
@@ -101,26 +84,56 @@ ${targetLocales.map((l) => `  "${l}": { ${fieldEntries.map(([key]) => `"${key}":
     .map((block) => block.text)
     .join("");
 
-  let cleaned = responseText.trim();
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-  }
-
-  try {
-    const translations = JSON.parse(cleaned);
-
-    // Validate structure
-    for (const locale of targetLocales) {
-      if (!translations[locale]) {
-        throw new Error(`Missing locale "${locale}" in response`);
-      }
-    }
-
-    return translations;
-  } catch (parseError) {
-    console.error("Failed to parse translation response:", responseText);
-    throw new Error(`Failed to parse translations: ${parseError.message}`);
-  }
+  return responseText.trim();
 }
 
-module.exports = { translateFields };
+/**
+ * Translate a set of fields from the source locale to target locales.
+ * Translates each field individually for reliability.
+ *
+ * @param {Object} fields - { fieldApiKey: "source text", ... }
+ * @param {string} sourceLocale - e.g. "pl-PL"
+ * @param {string[]} targetLocales - e.g. ["en", "ru"]
+ * @param {Object} options
+ * @param {string} options.modelName - Name of the DatoCMS model for context
+ * @returns {Object} - { en: { fieldApiKey: "translated", ... }, ru: { ... } }
+ */
+async function translateFields(fields, sourceLocale, targetLocales, options = {}) {
+  const { modelName = "" } = options;
+
+  const fieldEntries = Object.entries(fields).filter(
+    ([, value]) => value && typeof value === "string" && value.trim()
+  );
+
+  if (fieldEntries.length === 0) {
+    return {};
+  }
+
+  const result = {};
+  for (const locale of targetLocales) {
+    result[locale] = {};
+  }
+
+  // Translate each field to each target locale individually
+  for (const [fieldApiKey, sourceText] of fieldEntries) {
+    for (const targetLocale of targetLocales) {
+      try {
+        const translated = await translateSingleField(
+          sourceText,
+          sourceLocale,
+          targetLocale,
+          { modelName, fieldName: fieldApiKey }
+        );
+        result[targetLocale][fieldApiKey] = translated;
+      } catch (error) {
+        console.error(`  ⚠️  Failed to translate ${fieldApiKey} to ${targetLocale}: ${error.message}`);
+        // Skip this field/locale combo, don't break the whole batch
+        result[targetLocale][fieldApiKey] = null;
+      }
+    }
+  }
+
+  return result;
+}
+
+module.exports = { translateFields, translateSingleField };

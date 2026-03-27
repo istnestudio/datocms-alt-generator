@@ -1,6 +1,64 @@
 import { connect } from "datocms-plugin-sdk";
 
 connect({
+  // Declare global parameters (shows in plugin settings)
+  manualFieldExtensions() {
+    return [];
+  },
+
+  // Override to declare plugin parameters for the settings screen
+  renderConfigScreen(ctx) {
+    const container = document.getElementById("root");
+    if (!container) return;
+
+    const params = (ctx.plugin.attributes.parameters) || {};
+    const currentUrl = params.translationServerUrl || "";
+
+    container.innerHTML = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 16px; max-width: 500px;">
+        <h2 style="font-size: 18px; margin-bottom: 16px;">AI Translator — Ustawienia</h2>
+        <label style="display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px;">
+          Translation Server URL
+        </label>
+        <input
+          id="serverUrlInput"
+          type="text"
+          value="${currentUrl}"
+          placeholder="https://datocms-alt-generator.onrender.com"
+          style="width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; box-sizing: border-box;"
+        />
+        <p style="font-size: 12px; color: #64748b; margin-top: 6px;">
+          URL serwera Render z endpointem /translate (bez ukośnika na końcu)
+        </p>
+        <button
+          id="saveBtn"
+          style="margin-top: 16px; padding: 10px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;"
+        >
+          Zapisz
+        </button>
+        <div id="saveStatus" style="margin-top: 8px; font-size: 13px;"></div>
+      </div>
+    `;
+
+    document.getElementById("saveBtn").addEventListener("click", function() {
+      var url = document.getElementById("serverUrlInput").value.replace(/\/$/, "");
+      ctx.updatePluginParameters({
+        ...params,
+        translationServerUrl: url,
+      }).then(function() {
+        document.getElementById("saveStatus").innerHTML =
+          '<span style="color: #16a34a;">✅ Zapisano!</span>';
+      }).catch(function(e) {
+        document.getElementById("saveStatus").innerHTML =
+          '<span style="color: #dc2626;">❌ Błąd: ' + e.message + '</span>';
+      });
+    });
+
+    return {
+      destroy: function() { container.innerHTML = ""; },
+    };
+  },
+
   // Declare the sidebar panel
   itemFormSidebarPanels(itemType, ctx) {
     return [
