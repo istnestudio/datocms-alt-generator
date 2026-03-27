@@ -216,6 +216,26 @@ app.get("/debug-record/:recordId", async (req, res) => {
         _plPL_keys: val && val["pl-PL"] ? Object.keys(val["pl-PL"]) : null,
         _plPL_full: val ? val["pl-PL"] : null,
       };
+
+      // Fetch referenced block records
+      const doc = val && val["pl-PL"] ? val["pl-PL"].document : null;
+      if (doc && doc.children) {
+        const blockNodes = doc.children.filter(c => c.type === "block");
+        const blockRecords = [];
+        for (const bn of blockNodes.slice(0, 3)) { // first 3 blocks max
+          try {
+            const blockRecord = await client.items.find(bn.item);
+            blockRecords.push({
+              id: bn.item,
+              _allKeys: Object.keys(blockRecord),
+              _full: blockRecord,
+            });
+          } catch (e) {
+            blockRecords.push({ id: bn.item, error: e.message });
+          }
+        }
+        result[field.api_key]._blockRecords = blockRecords;
+      }
     }
     res.json(result);
   } catch (e) {
