@@ -131,58 +131,124 @@ async function translateFields(fields, sourceLocale, targetLocales, options = {}
 // ── STRUCTURED TEXT (DAST) translation ──
 // ══════════════════════════════════════════════
 
+// DatoCMS Structured Text field format:
+// {
+//   schema: "dast",
+//   document: { type: "root", children: [...] },
+//   blocks: [ { id, item_type, title, description, ... } ],
+//   links: [ ... ]
+// }
+
 /**
- * Extract full paragraph text from a DAST node's children (spans).
- * Used as context when translating individual spans.
+ * Deep clone any object.
  */
-function extractTextFromChildren(children) {
-  if (!Array.isArray(children)) return "";
-  return children
-    .filter((c) => c.type === "span" && c.value)
-    .map((c) => c.value)
-    .join("");
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj));
 }
 
 /**
- * Deep clone a DAST tree.
+ * Block types that need specific fields translated.
+ * Key = block model API key, Value = array of field API keys to translate.
  */
-function cloneDast(node) {
-  return JSON.parse(JSON.stringify(node));
-}
+const TRANSLATABLE_BLOCK_FIELDS = {
+  data1: ["title", "description", "link_name"],
+  text_accordion: ["title", "description"],
+  button: ["title"],
+};
 
 /**
- * Translate a DAST (Structured Text) tree.
+ * Translate a full DatoCMS Structured Text field value.
  *
- * Strategy:
- * - Walk the tree recursively
- * - For each paragraph/heading/listItem/blockquote: collect all span texts
- * - If single span → translate directly
- * - If multiple spans → translate each span with full paragraph context
- * - Skip: block references, inlineItem, code blocks, thematicBreak
- * - Preserve: all structure, marks, URLs, IDs
+ * Input: { schema: "dast", document: { type: "root", children: [...] }, blocks: [...], links: [...] }
+ * Output: same structure with translated spans + translated block fields.
  *
- * @param {Object} dast - The DAST object (with type "root" and children)
+ * @param {Object} structuredText - Full structured text value (schema + document + blocks + links)
  * @param {string} sourceLocale
  * @param {string} targetLocale
  * @param {Object} options
- * @returns {Object} - Translated DAST tree (deep clone)
+ * @returns {Object} - Translated structured text value
  */
-async function translateDast(dast, sourceLocale, targetLocale, options = {}) {
-  if (!dast || !dast.children) return dast;
+async function translateFullDast(structuredText, sourceLocale, targetLocale, options = {}) {
+  if (!structuredText) return structuredText;
 
-  const translated = cloneDast(dast);
-  await translateDastNode(translated, sourceLocale, targetLocale, options);
+  const translated = deepClone(structuredText);
+
+  // 1. Translate document tree (spans in paragraphs, headings, etc.)
+  if (translated.document && translated.document.children) {
+    await translateDastNode(translated.document, sourceLocale, targetLocale, options);
+  }
+
+  // 2. Translate blocks
+  if (translated.blocks && Array.isArray(translated.blocks)) {
+    for (const block of translated.blocks) {
+      await translateBlock(block, sourceLocale, targetLocale, options);
+    }
+  }
+
   return translated;
 }
 
 /**
- * Recursively translate DAST nodes in-place.
+ * Translate a single block's translatable fields.
+ * Determines block type from item_type and translates matching fields.
+ */
+async function translateBlock(block, sourceLocale, targetLocale, options) {
+  if (!block || !block.item_type) return;
+
+  // Get the block type API key — could be in different formats depending on CMA response
+  const blockTypeId = block.item_type?.id || block.item_type;
+
+  // Try to match by known block fields (since we might not have the API key directly)
+  // We check which translatable fields exist on this block
+  let fieldsToTranslate = null;
+
+  // First try: match by item_type api_key if available
+  if (block.item_type?.attributes?.api_key) {
+    fieldsToTranslate = TRANSLATABLE_BLOCK_FIELDS[block.item_type.attributes.api_key];
+  }
+
+  // Fallback: auto-detect by checking which known fields exist on the block
+  if (!fieldsToTranslate) {
+    for (const [blockType, blockFields] of Object.entries(TRANSLATABLE_BLOCK_FIELDS)) {
+      const hasMatchingFields = blockFields.some((f) => f in block);
+      if (hasMatchingFields) {
+        fieldsToTranslate = blockFields;
+        console.log(`   🔧 Block ${block.id}: auto-detected as "${blockType}" (has fields: ${blockFields.filter(f => f in block).join(", ")})`);
+        break;
+      }
+    }
+  }
+
+  if (!fieldsToTranslate) {
+    // Not a translatable block type (video, gallery, apartment_slider, space, etc.)
+    console.log(`   ⏭️  Block ${block.id}: no translatable fields found, copying as-is`);
+    return;
+  }
+
+  for (const fieldKey of fieldsToTranslate) {
+    const value = block[fieldKey];
+    if (!value || typeof value !== "string" || !value.trim()) continue;
+
+    try {
+      console.log(`   📝 Block ${block.id} field "${fieldKey}": translating "${value.substring(0, 50)}..."`);
+      block[fieldKey] = await translateSingleField(
+        value, sourceLocale, targetLocale,
+        { ...options, fieldName: `block.${fieldKey}` }
+      );
+    } catch (e) {
+      console.error(`  ⚠️  Block ${block.id} field "${fieldKey}" translate failed: ${e.message}`);
+    }
+  }
+}
+
+/**
+ * Recursively translate DAST document nodes in-place.
  */
 async function translateDastNode(node, sourceLocale, targetLocale, options) {
   if (!node || !node.children) return;
 
   for (const child of node.children) {
-    // Skip non-translatable nodes
+    // Skip non-translatable nodes (blocks are handled separately via blocks array)
     if (child.type === "block" || child.type === "inlineItem" || child.type === "thematicBreak") {
       continue;
     }
@@ -213,15 +279,10 @@ async function translateDastNode(node, sourceLocale, targetLocale, options) {
 
 /**
  * Translate span children of a paragraph/heading/link node.
- *
- * Single span: translate the value directly.
- * Multiple spans: translate each span individually with full paragraph context
- * for better quality (preserves formatting marks on each span).
  */
 async function translateSpanChildren(node, sourceLocale, targetLocale, options) {
   if (!node.children || node.children.length === 0) return;
 
-  // Collect spans and non-span children (like nested links in paragraphs)
   const spans = [];
   const nonSpanChildren = [];
 
@@ -229,7 +290,6 @@ async function translateSpanChildren(node, sourceLocale, targetLocale, options) 
     if (child.type === "span" && typeof child.value === "string" && child.value.trim()) {
       spans.push(child);
     } else if (child.type === "link" || child.type === "itemLink") {
-      // Nested links inside paragraphs — recurse into them
       nonSpanChildren.push(child);
     }
   }
@@ -257,7 +317,7 @@ async function translateSpanChildren(node, sourceLocale, targetLocale, options) 
   const fullText = spans.map((s) => s.value).join("");
 
   for (const span of spans) {
-    if (!span.value.trim()) continue; // skip whitespace-only spans
+    if (!span.value.trim()) continue;
 
     try {
       span.value = await translateSingleField(
@@ -276,18 +336,20 @@ async function translateSpanChildren(node, sourceLocale, targetLocale, options) 
 /**
  * Translate a Structured Text field for all target locales.
  *
- * @param {Object} dast - Source DAST tree
+ * @param {Object} structuredText - Source structured text { schema, document, blocks, links }
  * @param {string} sourceLocale
  * @param {string[]} targetLocales
  * @param {Object} options
- * @returns {Object} - { en: <translated DAST>, ru: <translated DAST> }
+ * @returns {Object} - { en: <translated structured text>, ru: <translated structured text> }
  */
-async function translateStructuredTextField(dast, sourceLocale, targetLocales, options = {}) {
+async function translateStructuredTextField(structuredText, sourceLocale, targetLocales, options = {}) {
   const result = {};
 
   for (const targetLocale of targetLocales) {
     try {
-      result[targetLocale] = await translateDast(dast, sourceLocale, targetLocale, options);
+      console.log(`   🌐 DAST → ${targetLocale}: starting translation...`);
+      result[targetLocale] = await translateFullDast(structuredText, sourceLocale, targetLocale, options);
+      console.log(`   ✅ DAST → ${targetLocale}: done`);
     } catch (error) {
       console.error(`  ⚠️  DAST translation to ${targetLocale} failed: ${error.message}`);
       result[targetLocale] = null;

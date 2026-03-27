@@ -301,6 +301,7 @@ app.post("/translate-record", async (req, res) => {
     }
 
     // ── Extract source DAST fields ──
+    // DatoCMS Structured Text format: { schema: "dast", document: { type: "root", children: [...] }, blocks: [...], links: [...] }
     const sourceDastFields = {};
     for (const field of localizedDastFields) {
       const fieldValue = record[field.api_key];
@@ -308,12 +309,14 @@ app.post("/translate-record", async (req, res) => {
       if (!fieldValue || typeof fieldValue !== "object") continue;
 
       const sourceDast = fieldValue[sourceLocale];
-      console.log(`   🔍 DAST "${field.api_key}" sourceLocale=${sourceLocale}: type=${typeof sourceDast}, hasChildren=${sourceDast?.children?.length || 0}, keys=${sourceDast ? Object.keys(sourceDast).join(",") : "null"}`);
-      if (!sourceDast || !sourceDast.children || sourceDast.children.length === 0) continue;
+      const doc = sourceDast?.document;
+      const blocksCount = sourceDast?.blocks?.length || 0;
+      console.log(`   🔍 DAST "${field.api_key}" sourceLocale=${sourceLocale}: keys=${sourceDast ? Object.keys(sourceDast).join(",") : "null"}, docChildren=${doc?.children?.length || 0}, blocks=${blocksCount}`);
+      if (!sourceDast || !doc || (!doc.children?.length && !blocksCount)) continue;
 
       const targetsMissing = targetLocales.some((l) => {
         const val = fieldValue[l];
-        return !val || !val.children || val.children.length === 0;
+        return !val || !val.document || !val.document.children || val.document.children.length === 0;
       });
 
       if (targetsMissing || overwrite) {
@@ -411,7 +414,7 @@ app.post("/translate-record", async (req, res) => {
         const updatedValue = { ...(currentValue || {}) };
         for (const locale of targetLocales) {
           if (dastTranslations[apiKey][locale]) {
-            if (!overwrite && updatedValue[locale] && updatedValue[locale].children && updatedValue[locale].children.length > 0) continue;
+            if (!overwrite && updatedValue[locale] && updatedValue[locale].document && updatedValue[locale].document.children && updatedValue[locale].document.children.length > 0) continue;
             updatedValue[locale] = dastTranslations[apiKey][locale];
           } else if (!(locale in updatedValue)) {
             updatedValue[locale] = null;
@@ -558,10 +561,11 @@ app.post("/bulk-translate", async (req, res) => {
           const fieldValue = record[field.api_key];
           if (!fieldValue || typeof fieldValue !== "object") continue;
           const sourceDast = fieldValue[sourceLocale];
-          if (!sourceDast || !sourceDast.children || sourceDast.children.length === 0) continue;
+          const doc = sourceDast?.document;
+          if (!sourceDast || !doc || (!doc.children?.length && !(sourceDast.blocks?.length))) continue;
           const targetsMissing = targetLocales.some((l) => {
             const val = fieldValue[l];
-            return !val || !val.children || val.children.length === 0;
+            return !val || !val.document || !val.document.children || val.document.children.length === 0;
           });
           if (targetsMissing || overwrite) sourceDastFields[field.api_key] = sourceDast;
         }
@@ -648,7 +652,7 @@ app.post("/bulk-translate", async (req, res) => {
               const updatedValue = { ...(currentValue || {}) };
               for (const locale of targetLocales) {
                 if (dastTranslations[apiKey][locale]) {
-                  if (!overwrite && updatedValue[locale] && updatedValue[locale].children && updatedValue[locale].children.length > 0) continue;
+                  if (!overwrite && updatedValue[locale] && updatedValue[locale].document && updatedValue[locale].document.children && updatedValue[locale].document.children.length > 0) continue;
                   updatedValue[locale] = dastTranslations[apiKey][locale];
                 } else if (!(locale in updatedValue)) {
                   updatedValue[locale] = null;
