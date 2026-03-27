@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const path = require("path");
 const { processAsset } = require("./alt-generator");
 const { getDatocmsClient } = require("./datocms-client");
-const { translateFields } = require("./translator");
+const { translateFields, translateStructuredTextField, translateSeoField } = require("./translator");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -257,15 +257,27 @@ app.post("/translate-record", async (req, res) => {
     }
 
     const fields = await client.fields.list(itemTypeId);
+
+    // Separate field types
     const localizedTextFields = fields.filter(
       (f) => f.localized && ["string", "text"].includes(f.field_type),
     );
+    const localizedDastFields = fields.filter(
+      (f) => f.localized && f.field_type === "structured_text",
+    );
+    const localizedSeoFields = fields.filter(
+      (f) => f.localized && f.field_type === "seo",
+    );
 
-    if (localizedTextFields.length === 0) {
-      return res.json({ status: "skipped", message: "No localized text fields in this model" });
+    const translatableCount = localizedTextFields.length + localizedDastFields.length + localizedSeoFields.length;
+    if (translatableCount === 0) {
+      return res.json({ status: "skipped", message: "No localized translatable fields in this model" });
     }
 
-    // Extract source locale values
+    const modelInfo = await client.itemTypes.find(itemTypeId);
+    const modelName = modelInfo.api_key;
+
+    // ── Extract source text fields ──
     const sourceFields = {};
     for (const field of localizedTextFields) {
       const fieldValue = record[field.api_key];
@@ -274,7 +286,6 @@ app.post("/translate-record", async (req, res) => {
       const sourceText = fieldValue[sourceLocale];
       if (!sourceText || typeof sourceText !== "string" || !sourceText.trim()) continue;
 
-      // Check if target locales need translation
       const targetsMissing = targetLocales.some((l) => {
         const val = fieldValue[l];
         return !val || (typeof val === "string" && !val.trim());
@@ -285,61 +296,154 @@ app.post("/translate-record", async (req, res) => {
       }
     }
 
-    if (Object.keys(sourceFields).length === 0) {
+    // ── Extract source DAST fields ──
+    const sourceDastFields = {};
+    for (const field of localizedDastFields) {
+      const fieldValue = record[field.api_key];
+      if (!fieldValue || typeof fieldValue !== "object") continue;
+
+      const sourceDast = fieldValue[sourceLocale];
+      if (!sourceDast || !sourceDast.children || sourceDast.children.length === 0) continue;
+
+      const targetsMissing = targetLocales.some((l) => {
+        const val = fieldValue[l];
+        return !val || !val.children || val.children.length === 0;
+      });
+
+      if (targetsMissing || overwrite) {
+        sourceDastFields[field.api_key] = sourceDast;
+      }
+    }
+
+    // ── Extract source SEO fields ──
+    const sourceSeoFields = {};
+    for (const field of localizedSeoFields) {
+      const fieldValue = record[field.api_key];
+      if (!fieldValue || typeof fieldValue !== "object") continue;
+
+      const sourceSeo = fieldValue[sourceLocale];
+      if (!sourceSeo) continue;
+
+      // Check if there's anything to translate (title or description)
+      const hasContent = (sourceSeo.title && sourceSeo.title.trim()) || (sourceSeo.description && sourceSeo.description.trim());
+      if (!hasContent) continue;
+
+      const targetsMissing = targetLocales.some((l) => {
+        const val = fieldValue[l];
+        return !val || (!val.title && !val.description);
+      });
+
+      if (targetsMissing || overwrite) {
+        sourceSeoFields[field.api_key] = sourceSeo;
+      }
+    }
+
+    const totalToTranslate = Object.keys(sourceFields).length + Object.keys(sourceDastFields).length + Object.keys(sourceSeoFields).length;
+
+    if (totalToTranslate === 0) {
       return res.json({ status: "skipped", message: "All fields already translated", translated: 0 });
     }
 
-    console.log(`🌐 Translating record ${recordId}: ${Object.keys(sourceFields).length} fields`);
+    console.log(`🌐 Translating record ${recordId} (${modelName}): ${Object.keys(sourceFields).length} text, ${Object.keys(sourceDastFields).length} DAST, ${Object.keys(sourceSeoFields).length} SEO`);
 
-    // Translate
-    const modelInfo = await client.itemTypes.find(itemTypeId);
-    const translations = await translateFields(sourceFields, sourceLocale, targetLocales, {
-      modelName: modelInfo.api_key,
-    });
+    // ── Translate text fields ──
+    const translations = Object.keys(sourceFields).length > 0
+      ? await translateFields(sourceFields, sourceLocale, targetLocales, { modelName })
+      : {};
 
-    // Build update payload — MUST include ALL localized fields when adding new locales
-    // DatoCMS requires every localized field to have a value (null is OK) for new locales
+    // ── Translate DAST fields ──
+    const dastTranslations = {}; // { fieldApiKey: { en: <DAST>, ru: <DAST> } }
+    for (const [fieldApiKey, sourceDast] of Object.entries(sourceDastFields)) {
+      try {
+        dastTranslations[fieldApiKey] = await translateStructuredTextField(
+          sourceDast, sourceLocale, targetLocales, { modelName, fieldName: fieldApiKey }
+        );
+      } catch (e) {
+        console.error(`  ⚠️  DAST field ${fieldApiKey} translation failed: ${e.message}`);
+      }
+    }
+
+    // ── Translate SEO fields ──
+    const seoTranslations = {}; // { fieldApiKey: { en: { title, description, ... }, ru: { ... } } }
+    for (const [fieldApiKey, sourceSeo] of Object.entries(sourceSeoFields)) {
+      try {
+        seoTranslations[fieldApiKey] = await translateSeoField(
+          sourceSeo, sourceLocale, targetLocales, { modelName, fieldName: fieldApiKey }
+        );
+      } catch (e) {
+        console.error(`  ⚠️  SEO field ${fieldApiKey} translation failed: ${e.message}`);
+      }
+    }
+
+    // ── Build update payload — MUST include ALL localized fields when adding new locales ──
     const allLocalizedFields = fields.filter((f) => f.localized);
     const updatePayload = {};
 
     for (const field of allLocalizedFields) {
       const currentValue = record[field.api_key];
+      const apiKey = field.api_key;
 
-      // For non-text fields or fields we didn't translate: just ensure all locales exist
-      if (!sourceFields[field.api_key]) {
-        if (currentValue && typeof currentValue === "object") {
-          const updated = { ...currentValue };
-          for (const locale of targetLocales) {
-            if (!(locale in updated)) {
-              updated[locale] = null;
-            }
+      // ── Text fields we translated ──
+      if (sourceFields[apiKey]) {
+        const updatedValue = { ...(currentValue || {}) };
+        for (const locale of targetLocales) {
+          if (translations[locale] && translations[locale][apiKey]) {
+            if (!overwrite && updatedValue[locale] && String(updatedValue[locale]).trim()) continue;
+            updatedValue[locale] = translations[locale][apiKey];
+          } else if (!(locale in updatedValue)) {
+            updatedValue[locale] = null;
           }
-          updatePayload[field.api_key] = updated;
         }
+        updatePayload[apiKey] = updatedValue;
         continue;
       }
 
-      // For translated fields: fill in translations
-      const updatedValue = { ...(currentValue || {}) };
-      for (const locale of targetLocales) {
-        if (translations[locale] && translations[locale][field.api_key]) {
-          if (!overwrite && updatedValue[locale] && String(updatedValue[locale]).trim()) {
-            // Keep existing translation, but ensure locale key exists
-            continue;
+      // ── DAST fields we translated ──
+      if (sourceDastFields[apiKey] && dastTranslations[apiKey]) {
+        const updatedValue = { ...(currentValue || {}) };
+        for (const locale of targetLocales) {
+          if (dastTranslations[apiKey][locale]) {
+            if (!overwrite && updatedValue[locale] && updatedValue[locale].children && updatedValue[locale].children.length > 0) continue;
+            updatedValue[locale] = dastTranslations[apiKey][locale];
+          } else if (!(locale in updatedValue)) {
+            updatedValue[locale] = null;
           }
-          updatedValue[locale] = translations[locale][field.api_key];
-        } else if (!(locale in updatedValue)) {
-          updatedValue[locale] = null;
         }
+        updatePayload[apiKey] = updatedValue;
+        continue;
       }
 
-      updatePayload[field.api_key] = updatedValue;
+      // ── SEO fields we translated ──
+      if (sourceSeoFields[apiKey] && seoTranslations[apiKey]) {
+        const updatedValue = { ...(currentValue || {}) };
+        for (const locale of targetLocales) {
+          if (seoTranslations[apiKey][locale]) {
+            if (!overwrite && updatedValue[locale] && (updatedValue[locale].title || updatedValue[locale].description)) continue;
+            updatedValue[locale] = seoTranslations[apiKey][locale];
+          } else if (!(locale in updatedValue)) {
+            updatedValue[locale] = null;
+          }
+        }
+        updatePayload[apiKey] = updatedValue;
+        continue;
+      }
+
+      // ── Non-translated fields: just ensure all locales exist ──
+      if (currentValue && typeof currentValue === "object") {
+        const updated = { ...currentValue };
+        for (const locale of targetLocales) {
+          if (!(locale in updated)) {
+            updated[locale] = null;
+          }
+        }
+        updatePayload[apiKey] = updated;
+      }
     }
 
     // Save to DatoCMS
     await client.items.update(recordId, updatePayload);
 
-    const translatedCount = Object.keys(updatePayload).length;
+    const translatedCount = totalToTranslate;
     console.log(`✅ Record ${recordId}: ${translatedCount} fields translated and saved`);
 
     res.json({
@@ -393,17 +497,24 @@ app.post("/bulk-translate", async (req, res) => {
       // Get fields for this model
       const fields = await client.fields.list(model.id);
 
-      // Find localized text/string fields ONLY (skip structured_text, seo, rich_text etc.)
-      const localizedFields = fields.filter(
+      // Find localized translatable fields
+      const textFields = fields.filter(
         (f) => f.localized && ["string", "text"].includes(f.field_type),
       );
+      const dastFields = fields.filter(
+        (f) => f.localized && f.field_type === "structured_text",
+      );
+      const seoFields = fields.filter(
+        (f) => f.localized && f.field_type === "seo",
+      );
 
-      if (localizedFields.length === 0) {
-        console.log(`  ⏭️  ${model.api_key}: no localized text fields`);
+      const translatableCount = textFields.length + dastFields.length + seoFields.length;
+      if (translatableCount === 0) {
+        console.log(`  ⏭️  ${model.api_key}: no localized translatable fields`);
         continue;
       }
 
-      console.log(`\n📋 Model: ${model.api_key} (${localizedFields.length} localized fields)`);
+      console.log(`\n📋 Model: ${model.api_key} (${textFields.length} text, ${dastFields.length} DAST, ${seoFields.length} SEO)`);
 
       // Get all records for this model
       const records = [];
@@ -418,45 +529,90 @@ app.post("/bulk-translate", async (req, res) => {
       console.log(`   ${records.length} records found`);
 
       for (const record of records) {
-        // Extract source locale values for localized fields
-        const sourceFields = {};
-        let needsTranslation = false;
+        // Extract source values
+        const sourceTextFields = {};
+        const sourceDastFields = {};
+        const sourceSeoFields = {};
 
-        for (const field of localizedFields) {
+        for (const field of textFields) {
           const fieldValue = record[field.api_key];
           if (!fieldValue || typeof fieldValue !== "object") continue;
-
           const sourceText = fieldValue[sourceLocale];
-          if (!sourceText || (typeof sourceText === "string" && !sourceText.trim())) continue;
-
-          // Check if target locales need translation
+          if (!sourceText || typeof sourceText !== "string" || !sourceText.trim()) continue;
           const targetsMissing = targetLocales.some((l) => {
             const val = fieldValue[l];
             return !val || (typeof val === "string" && !val.trim());
           });
-
-          if (targetsMissing || overwrite) {
-            // Only translate string/text fields (skip structured_text and seo for now in bulk)
-            if (typeof sourceText === "string") {
-              sourceFields[field.api_key] = sourceText;
-              needsTranslation = true;
-            }
-          }
+          if (targetsMissing || overwrite) sourceTextFields[field.api_key] = sourceText;
         }
 
-        if (!needsTranslation) {
+        for (const field of dastFields) {
+          const fieldValue = record[field.api_key];
+          if (!fieldValue || typeof fieldValue !== "object") continue;
+          const sourceDast = fieldValue[sourceLocale];
+          if (!sourceDast || !sourceDast.children || sourceDast.children.length === 0) continue;
+          const targetsMissing = targetLocales.some((l) => {
+            const val = fieldValue[l];
+            return !val || !val.children || val.children.length === 0;
+          });
+          if (targetsMissing || overwrite) sourceDastFields[field.api_key] = sourceDast;
+        }
+
+        for (const field of seoFields) {
+          const fieldValue = record[field.api_key];
+          if (!fieldValue || typeof fieldValue !== "object") continue;
+          const sourceSeo = fieldValue[sourceLocale];
+          if (!sourceSeo) continue;
+          const hasContent = (sourceSeo.title && sourceSeo.title.trim()) || (sourceSeo.description && sourceSeo.description.trim());
+          if (!hasContent) continue;
+          const targetsMissing = targetLocales.some((l) => {
+            const val = fieldValue[l];
+            return !val || (!val.title && !val.description);
+          });
+          if (targetsMissing || overwrite) sourceSeoFields[field.api_key] = sourceSeo;
+        }
+
+        const totalFields = Object.keys(sourceTextFields).length + Object.keys(sourceDastFields).length + Object.keys(sourceSeoFields).length;
+        if (totalFields === 0) {
           totalSkipped++;
           continue;
         }
 
         if (dryRun) {
-          console.log(`   [DRY RUN] Would translate record ${record.id}: ${Object.keys(sourceFields).join(", ")}`);
+          console.log(`   [DRY RUN] Would translate record ${record.id}: ${[...Object.keys(sourceTextFields), ...Object.keys(sourceDastFields), ...Object.keys(sourceSeoFields)].join(", ")}`);
           totalProcessed++;
           continue;
         }
 
         try {
-          const translations = await translateFields(sourceFields, sourceLocale, targetLocales, { modelName: model.api_key });
+          // Translate text fields
+          const translations = Object.keys(sourceTextFields).length > 0
+            ? await translateFields(sourceTextFields, sourceLocale, targetLocales, { modelName: model.api_key })
+            : {};
+
+          // Translate DAST fields
+          const dastTranslations = {};
+          for (const [apiKey, sourceDast] of Object.entries(sourceDastFields)) {
+            try {
+              dastTranslations[apiKey] = await translateStructuredTextField(
+                sourceDast, sourceLocale, targetLocales, { modelName: model.api_key, fieldName: apiKey }
+              );
+            } catch (e) {
+              console.error(`   ⚠️  DAST ${apiKey}: ${e.message}`);
+            }
+          }
+
+          // Translate SEO fields
+          const seoTranslations = {};
+          for (const [apiKey, sourceSeo] of Object.entries(sourceSeoFields)) {
+            try {
+              seoTranslations[apiKey] = await translateSeoField(
+                sourceSeo, sourceLocale, targetLocales, { modelName: model.api_key, fieldName: apiKey }
+              );
+            } catch (e) {
+              console.error(`   ⚠️  SEO ${apiKey}: ${e.message}`);
+            }
+          }
 
           // Build update payload — include ALL localized fields for new locale support
           const allLocalized = fields.filter((f) => f.localized);
@@ -464,27 +620,58 @@ app.post("/bulk-translate", async (req, res) => {
 
           for (const field of allLocalized) {
             const currentValue = record[field.api_key];
-            if (!sourceFields[field.api_key]) {
-              // Non-translated field: ensure all locales exist (null OK)
-              if (currentValue && typeof currentValue === "object") {
-                const updated = { ...currentValue };
-                for (const locale of targetLocales) {
-                  if (!(locale in updated)) updated[locale] = null;
+            const apiKey = field.api_key;
+
+            if (sourceTextFields[apiKey]) {
+              const updatedValue = { ...(currentValue || {}) };
+              for (const locale of targetLocales) {
+                if (translations[locale] && translations[locale][apiKey]) {
+                  if (!overwrite && updatedValue[locale] && String(updatedValue[locale]).trim()) continue;
+                  updatedValue[locale] = translations[locale][apiKey];
+                } else if (!(locale in updatedValue)) {
+                  updatedValue[locale] = null;
                 }
-                updatePayload[field.api_key] = updated;
               }
+              updatePayload[apiKey] = updatedValue;
               continue;
             }
 
-            const updatedValue = { ...(currentValue || {}) };
-            for (const locale of targetLocales) {
-              if (translations[locale] && translations[locale][field.api_key]) {
-                updatedValue[locale] = translations[locale][field.api_key];
-              } else if (!(locale in updatedValue)) {
-                updatedValue[locale] = null;
+            if (sourceDastFields[apiKey] && dastTranslations[apiKey]) {
+              const updatedValue = { ...(currentValue || {}) };
+              for (const locale of targetLocales) {
+                if (dastTranslations[apiKey][locale]) {
+                  if (!overwrite && updatedValue[locale] && updatedValue[locale].children && updatedValue[locale].children.length > 0) continue;
+                  updatedValue[locale] = dastTranslations[apiKey][locale];
+                } else if (!(locale in updatedValue)) {
+                  updatedValue[locale] = null;
+                }
               }
+              updatePayload[apiKey] = updatedValue;
+              continue;
             }
-            updatePayload[field.api_key] = updatedValue;
+
+            if (sourceSeoFields[apiKey] && seoTranslations[apiKey]) {
+              const updatedValue = { ...(currentValue || {}) };
+              for (const locale of targetLocales) {
+                if (seoTranslations[apiKey][locale]) {
+                  if (!overwrite && updatedValue[locale] && (updatedValue[locale].title || updatedValue[locale].description)) continue;
+                  updatedValue[locale] = seoTranslations[apiKey][locale];
+                } else if (!(locale in updatedValue)) {
+                  updatedValue[locale] = null;
+                }
+              }
+              updatePayload[apiKey] = updatedValue;
+              continue;
+            }
+
+            // Non-translated field: ensure all locales exist
+            if (currentValue && typeof currentValue === "object") {
+              const updated = { ...currentValue };
+              for (const locale of targetLocales) {
+                if (!(locale in updated)) updated[locale] = null;
+              }
+              updatePayload[apiKey] = updated;
+            }
           }
 
           await client.items.update(record.id, updatePayload);

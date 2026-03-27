@@ -22,17 +22,10 @@ const LOCALE_NAMES = {
   es: "Spanish",
 };
 
-/**
- * Translate a single text from source locale to a single target locale.
- *
- * @param {string} text - Source text to translate
- * @param {string} sourceLocale - e.g. "pl-PL"
- * @param {string} targetLocale - e.g. "en"
- * @param {Object} options
- * @param {string} options.modelName - DatoCMS model name for context
- * @param {string} options.fieldName - Field API key for context
- * @returns {string} - Translated text
- */
+// ══════════════════════════════════════════════
+// ── CORE: Single text translation with retry ──
+// ══════════════════════════════════════════════
+
 async function translateSingleField(text, sourceLocale, targetLocale, options = {}) {
   const client = getAnthropicClient();
   const { modelName = "", fieldName = "" } = options;
@@ -67,7 +60,6 @@ CRITICAL: Respond with ONLY the translated text. No quotes around it, no explana
 ${text}
 ---`;
 
-  // Retry logic for 529 Overloaded errors
   const MAX_RETRIES = 3;
   let lastError = null;
 
@@ -77,12 +69,7 @@ ${text}
         model: "claude-sonnet-4-20250514",
         max_tokens: 4096,
         system: systemPrompt,
-        messages: [
-          {
-            role: "user",
-            content: userPrompt,
-          },
-        ],
+        messages: [{ role: "user", content: userPrompt }],
       });
 
       const responseText = message.content
@@ -94,33 +81,22 @@ ${text}
     } catch (error) {
       lastError = error;
       const status = error.status || error.statusCode || 0;
-
-      // Retry on 529 (overloaded) and 429 (rate limit)
       if ((status === 529 || status === 429) && attempt < MAX_RETRIES) {
-        const delay = attempt * 3000; // 3s, 6s, 9s
+        const delay = attempt * 3000;
         console.log(`  ⏳ API overloaded (${status}), retry ${attempt}/${MAX_RETRIES} in ${delay / 1000}s...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
-
       throw error;
     }
   }
-
   throw lastError;
 }
 
-/**
- * Translate a set of fields from the source locale to target locales.
- * Translates each field individually for reliability.
- *
- * @param {Object} fields - { fieldApiKey: "source text", ... }
- * @param {string} sourceLocale - e.g. "pl-PL"
- * @param {string[]} targetLocales - e.g. ["en", "ru"]
- * @param {Object} options
- * @param {string} options.modelName - Name of the DatoCMS model for context
- * @returns {Object} - { en: { fieldApiKey: "translated", ... }, ru: { ... } }
- */
+// ══════════════════════════════════════════════
+// ── Translate plain string/text fields ──
+// ══════════════════════════════════════════════
+
 async function translateFields(fields, sourceLocale, targetLocales, options = {}) {
   const { modelName = "" } = options;
 
@@ -128,29 +104,21 @@ async function translateFields(fields, sourceLocale, targetLocales, options = {}
     ([, value]) => value && typeof value === "string" && value.trim()
   );
 
-  if (fieldEntries.length === 0) {
-    return {};
-  }
+  if (fieldEntries.length === 0) return {};
 
   const result = {};
-  for (const locale of targetLocales) {
-    result[locale] = {};
-  }
+  for (const locale of targetLocales) result[locale] = {};
 
-  // Translate each field to each target locale individually
   for (const [fieldApiKey, sourceText] of fieldEntries) {
     for (const targetLocale of targetLocales) {
       try {
         const translated = await translateSingleField(
-          sourceText,
-          sourceLocale,
-          targetLocale,
+          sourceText, sourceLocale, targetLocale,
           { modelName, fieldName: fieldApiKey }
         );
         result[targetLocale][fieldApiKey] = translated;
       } catch (error) {
         console.error(`  ⚠️  Failed to translate ${fieldApiKey} to ${targetLocale}: ${error.message}`);
-        // Skip this field/locale combo, don't break the whole batch
         result[targetLocale][fieldApiKey] = null;
       }
     }
@@ -159,4 +127,230 @@ async function translateFields(fields, sourceLocale, targetLocales, options = {}
   return result;
 }
 
-module.exports = { translateFields, translateSingleField };
+// ══════════════════════════════════════════════
+// ── STRUCTURED TEXT (DAST) translation ──
+// ══════════════════════════════════════════════
+
+/**
+ * Extract full paragraph text from a DAST node's children (spans).
+ * Used as context when translating individual spans.
+ */
+function extractTextFromChildren(children) {
+  if (!Array.isArray(children)) return "";
+  return children
+    .filter((c) => c.type === "span" && c.value)
+    .map((c) => c.value)
+    .join("");
+}
+
+/**
+ * Deep clone a DAST tree.
+ */
+function cloneDast(node) {
+  return JSON.parse(JSON.stringify(node));
+}
+
+/**
+ * Translate a DAST (Structured Text) tree.
+ *
+ * Strategy:
+ * - Walk the tree recursively
+ * - For each paragraph/heading/listItem/blockquote: collect all span texts
+ * - If single span → translate directly
+ * - If multiple spans → translate each span with full paragraph context
+ * - Skip: block references, inlineItem, code blocks, thematicBreak
+ * - Preserve: all structure, marks, URLs, IDs
+ *
+ * @param {Object} dast - The DAST object (with type "root" and children)
+ * @param {string} sourceLocale
+ * @param {string} targetLocale
+ * @param {Object} options
+ * @returns {Object} - Translated DAST tree (deep clone)
+ */
+async function translateDast(dast, sourceLocale, targetLocale, options = {}) {
+  if (!dast || !dast.children) return dast;
+
+  const translated = cloneDast(dast);
+  await translateDastNode(translated, sourceLocale, targetLocale, options);
+  return translated;
+}
+
+/**
+ * Recursively translate DAST nodes in-place.
+ */
+async function translateDastNode(node, sourceLocale, targetLocale, options) {
+  if (!node || !node.children) return;
+
+  for (const child of node.children) {
+    // Skip non-translatable nodes
+    if (child.type === "block" || child.type === "inlineItem" || child.type === "thematicBreak") {
+      continue;
+    }
+
+    // Code blocks — don't translate code
+    if (child.type === "code") {
+      continue;
+    }
+
+    // Nodes with span children: paragraph, heading, link, itemLink
+    if (["paragraph", "heading"].includes(child.type)) {
+      await translateSpanChildren(child, sourceLocale, targetLocale, options);
+      continue;
+    }
+
+    // Link / itemLink — translate link text (spans), keep URL/item
+    if (child.type === "link" || child.type === "itemLink") {
+      await translateSpanChildren(child, sourceLocale, targetLocale, options);
+      continue;
+    }
+
+    // Container nodes: list, listItem, blockquote — recurse
+    if (child.children) {
+      await translateDastNode(child, sourceLocale, targetLocale, options);
+    }
+  }
+}
+
+/**
+ * Translate span children of a paragraph/heading/link node.
+ *
+ * Single span: translate the value directly.
+ * Multiple spans: translate each span individually with full paragraph context
+ * for better quality (preserves formatting marks on each span).
+ */
+async function translateSpanChildren(node, sourceLocale, targetLocale, options) {
+  if (!node.children || node.children.length === 0) return;
+
+  // Collect spans and non-span children (like nested links in paragraphs)
+  const spans = [];
+  const nonSpanChildren = [];
+
+  for (const child of node.children) {
+    if (child.type === "span" && typeof child.value === "string" && child.value.trim()) {
+      spans.push(child);
+    } else if (child.type === "link" || child.type === "itemLink") {
+      // Nested links inside paragraphs — recurse into them
+      nonSpanChildren.push(child);
+    }
+  }
+
+  // Translate nested links
+  for (const linkNode of nonSpanChildren) {
+    await translateSpanChildren(linkNode, sourceLocale, targetLocale, options);
+  }
+
+  if (spans.length === 0) return;
+
+  // Single span — translate directly
+  if (spans.length === 1) {
+    try {
+      spans[0].value = await translateSingleField(
+        spans[0].value, sourceLocale, targetLocale, options
+      );
+    } catch (e) {
+      console.error(`  ⚠️  DAST span translate failed: ${e.message}`);
+    }
+    return;
+  }
+
+  // Multiple spans — translate each with full paragraph as context
+  const fullText = spans.map((s) => s.value).join("");
+
+  for (const span of spans) {
+    if (!span.value.trim()) continue; // skip whitespace-only spans
+
+    try {
+      span.value = await translateSingleField(
+        span.value, sourceLocale, targetLocale,
+        {
+          ...options,
+          fieldName: (options.fieldName || "") + " (paragraph context: " + fullText.substring(0, 200) + ")",
+        }
+      );
+    } catch (e) {
+      console.error(`  ⚠️  DAST span translate failed: ${e.message}`);
+    }
+  }
+}
+
+/**
+ * Translate a Structured Text field for all target locales.
+ *
+ * @param {Object} dast - Source DAST tree
+ * @param {string} sourceLocale
+ * @param {string[]} targetLocales
+ * @param {Object} options
+ * @returns {Object} - { en: <translated DAST>, ru: <translated DAST> }
+ */
+async function translateStructuredTextField(dast, sourceLocale, targetLocales, options = {}) {
+  const result = {};
+
+  for (const targetLocale of targetLocales) {
+    try {
+      result[targetLocale] = await translateDast(dast, sourceLocale, targetLocale, options);
+    } catch (error) {
+      console.error(`  ⚠️  DAST translation to ${targetLocale} failed: ${error.message}`);
+      result[targetLocale] = null;
+    }
+  }
+
+  return result;
+}
+
+// ══════════════════════════════════════════════
+// ── SEO field translation ──
+// ══════════════════════════════════════════════
+
+/**
+ * Translate a DatoCMS SEO field.
+ * SEO fields have: { title, description, image, twitter_card }
+ * We only translate title and description.
+ *
+ * @param {Object} seoObj - Source SEO object
+ * @param {string} sourceLocale
+ * @param {string[]} targetLocales
+ * @param {Object} options
+ * @returns {Object} - { en: { title, description, image, twitter_card }, ru: { ... } }
+ */
+async function translateSeoField(seoObj, sourceLocale, targetLocales, options = {}) {
+  if (!seoObj) return {};
+
+  const result = {};
+
+  for (const targetLocale of targetLocales) {
+    const translated = { ...seoObj }; // copy image, twitter_card, etc.
+
+    if (seoObj.title && typeof seoObj.title === "string" && seoObj.title.trim()) {
+      try {
+        translated.title = await translateSingleField(
+          seoObj.title, sourceLocale, targetLocale,
+          { ...options, fieldName: "seo_title" }
+        );
+      } catch (e) {
+        console.error(`  ⚠️  SEO title translate to ${targetLocale} failed: ${e.message}`);
+      }
+    }
+
+    if (seoObj.description && typeof seoObj.description === "string" && seoObj.description.trim()) {
+      try {
+        translated.description = await translateSingleField(
+          seoObj.description, sourceLocale, targetLocale,
+          { ...options, fieldName: "seo_description" }
+        );
+      } catch (e) {
+        console.error(`  ⚠️  SEO description translate to ${targetLocale} failed: ${e.message}`);
+      }
+    }
+
+    result[targetLocale] = translated;
+  }
+
+  return result;
+}
+
+module.exports = {
+  translateFields,
+  translateSingleField,
+  translateStructuredTextField,
+  translateSeoField,
+};
