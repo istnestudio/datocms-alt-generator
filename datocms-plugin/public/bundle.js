@@ -1105,42 +1105,69 @@
             return response.json();
           }).then(function(translations) {
             var filledCount = 0;
+            var debugLog = [];
             targetLocales.forEach(function(locale) {
-              if (!translations[locale]) return;
+              if (!translations[locale]) {
+                debugLog.push("Brak t\u0142umacze\u0144 dla locale: " + locale);
+                return;
+              }
               Object.keys(translations[locale]).forEach(function(fieldApiKey) {
                 var translatedValue = translations[locale][fieldApiKey];
-                if (!translatedValue) return;
+                if (!translatedValue) {
+                  debugLog.push(fieldApiKey + "." + locale + " = null (pomini\u0119to)");
+                  return;
+                }
                 var existingValue = null;
                 try {
-                  existingValue = ctx.getFieldValue(fieldApiKey + "." + locale);
+                  var fv = ctx.formValues || {};
+                  if (fv[fieldApiKey] && typeof fv[fieldApiKey] === "object") {
+                    existingValue = fv[fieldApiKey][locale];
+                  }
                 } catch (e) {
                 }
-                if (!existingValue) {
-                  try {
-                    var fv = ctx.formValues || {};
-                    if (fv[fieldApiKey] && typeof fv[fieldApiKey] === "object") {
-                      existingValue = fv[fieldApiKey][locale];
-                    }
-                  } catch (e) {
-                  }
+                if (existingValue && String(existingValue).trim() && !overwrite) {
+                  debugLog.push(fieldApiKey + "." + locale + " = istnieje, pomini\u0119to");
+                  return;
                 }
-                if (existingValue && String(existingValue).trim() && !overwrite) return;
+                var setOk = false;
                 try {
-                  ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
-                  filledCount++;
+                  var currentFull = ctx.getFieldValue(fieldApiKey);
+                  if (typeof currentFull === "object" && currentFull !== null) {
+                    var updated = Object.assign({}, currentFull);
+                    updated[locale] = translatedValue;
+                    ctx.setFieldValue(fieldApiKey, updated);
+                    setOk = true;
+                    debugLog.push(fieldApiKey + "." + locale + " = OK (full object)");
+                  }
                 } catch (e) {
+                  debugLog.push(fieldApiKey + "." + locale + " full object err: " + e.message);
+                }
+                if (!setOk) {
                   try {
-                    var current = ctx.getFieldValue(fieldApiKey) || {};
-                    current[locale] = translatedValue;
-                    ctx.setFieldValue(fieldApiKey, current);
-                    filledCount++;
-                  } catch (e2) {
-                    setStatus("B\u0142\u0105d zapisu pola " + fieldApiKey + ": " + e2.message, "error");
+                    ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
+                    setOk = true;
+                    debugLog.push(fieldApiKey + "." + locale + " = OK (dot notation)");
+                  } catch (e) {
+                    debugLog.push(fieldApiKey + "." + locale + " dot err: " + e.message);
                   }
                 }
+                if (!setOk) {
+                  try {
+                    ctx.setFieldValue(fieldApiKey, translatedValue, locale);
+                    setOk = true;
+                    debugLog.push(fieldApiKey + "." + locale + " = OK (3-arg)");
+                  } catch (e) {
+                    debugLog.push(fieldApiKey + "." + locale + " 3-arg err: " + e.message);
+                  }
+                }
+                if (setOk) filledCount++;
               });
             });
-            setStatus("\u2705 Przet\u0142umaczono! Wype\u0142niono " + filledCount + " p\xF3l. Kliknij Save aby zapisa\u0107.", "success");
+            var msg = "\u2705 Przet\u0142umaczono! Wype\u0142niono " + filledCount + " p\xF3l. Kliknij Save aby zapisa\u0107.";
+            if (debugLog.length > 0) {
+              msg += "<br><br><strong>Debug:</strong><br>" + debugLog.join("<br>");
+            }
+            setStatus(msg, filledCount > 0 ? "success" : "error");
           }).catch(function(error) {
             setStatus("\u274C B\u0142\u0105d: " + error.message, "error");
           }).finally(function() {

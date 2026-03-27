@@ -281,44 +281,80 @@ connect({
         })
         .then(function(translations) {
           var filledCount = 0;
+          var debugLog = [];
+
           targetLocales.forEach(function(locale) {
-            if (!translations[locale]) return;
+            if (!translations[locale]) {
+              debugLog.push("Brak tłumaczeń dla locale: " + locale);
+              return;
+            }
             Object.keys(translations[locale]).forEach(function(fieldApiKey) {
               var translatedValue = translations[locale][fieldApiKey];
-              if (!translatedValue) return;
-
-              // Check existing
-              var existingValue = null;
-              try { existingValue = ctx.getFieldValue(fieldApiKey + "." + locale); } catch(e) {}
-              if (!existingValue) {
-                try {
-                  var fv = ctx.formValues || {};
-                  if (fv[fieldApiKey] && typeof fv[fieldApiKey] === "object") {
-                    existingValue = fv[fieldApiKey][locale];
-                  }
-                } catch(e) {}
+              if (!translatedValue) {
+                debugLog.push(fieldApiKey + "." + locale + " = null (pominięto)");
+                return;
               }
 
-              if (existingValue && String(existingValue).trim() && !overwrite) return;
-
-              // Try setting
+              // Check existing value
+              var existingValue = null;
               try {
-                ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
-                filledCount++;
+                var fv = ctx.formValues || {};
+                if (fv[fieldApiKey] && typeof fv[fieldApiKey] === "object") {
+                  existingValue = fv[fieldApiKey][locale];
+                }
+              } catch(e) {}
+
+              if (existingValue && String(existingValue).trim() && !overwrite) {
+                debugLog.push(fieldApiKey + "." + locale + " = istnieje, pominięto");
+                return;
+              }
+
+              // Strategy 1: set full localized object
+              var setOk = false;
+              try {
+                var currentFull = ctx.getFieldValue(fieldApiKey);
+                if (typeof currentFull === "object" && currentFull !== null) {
+                  var updated = Object.assign({}, currentFull);
+                  updated[locale] = translatedValue;
+                  ctx.setFieldValue(fieldApiKey, updated);
+                  setOk = true;
+                  debugLog.push(fieldApiKey + "." + locale + " = OK (full object)");
+                }
               } catch(e) {
+                debugLog.push(fieldApiKey + "." + locale + " full object err: " + e.message);
+              }
+
+              // Strategy 2: dot notation
+              if (!setOk) {
                 try {
-                  var current = ctx.getFieldValue(fieldApiKey) || {};
-                  current[locale] = translatedValue;
-                  ctx.setFieldValue(fieldApiKey, current);
-                  filledCount++;
-                } catch(e2) {
-                  setStatus("Błąd zapisu pola " + fieldApiKey + ": " + e2.message, "error");
+                  ctx.setFieldValue(fieldApiKey + "." + locale, translatedValue);
+                  setOk = true;
+                  debugLog.push(fieldApiKey + "." + locale + " = OK (dot notation)");
+                } catch(e) {
+                  debugLog.push(fieldApiKey + "." + locale + " dot err: " + e.message);
                 }
               }
+
+              // Strategy 3: try toggling locale via setFieldValue(path, locale, value)
+              if (!setOk) {
+                try {
+                  ctx.setFieldValue(fieldApiKey, translatedValue, locale);
+                  setOk = true;
+                  debugLog.push(fieldApiKey + "." + locale + " = OK (3-arg)");
+                } catch(e) {
+                  debugLog.push(fieldApiKey + "." + locale + " 3-arg err: " + e.message);
+                }
+              }
+
+              if (setOk) filledCount++;
             });
           });
 
-          setStatus("✅ Przetłumaczono! Wypełniono " + filledCount + " pól. Kliknij Save aby zapisać.", "success");
+          var msg = "✅ Przetłumaczono! Wypełniono " + filledCount + " pól. Kliknij Save aby zapisać.";
+          if (debugLog.length > 0) {
+            msg += "<br><br><strong>Debug:</strong><br>" + debugLog.join("<br>");
+          }
+          setStatus(msg, filledCount > 0 ? "success" : "error");
         })
         .catch(function(error) {
           setStatus("❌ Błąd: " + error.message, "error");
