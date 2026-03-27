@@ -78,13 +78,15 @@ connect({
       return;
     }
 
-    // Safe parameter access
-    let serverUrl = "";
+    // Server URL — hardcoded fallback, can be overridden via plugin parameters
+    var serverUrl = "https://datocms-alt-generator.onrender.com";
     try {
-      const params = (ctx.plugin && ctx.plugin.attributes && ctx.plugin.attributes.parameters) || {};
-      serverUrl = (params.translationServerUrl || "").replace(/\/$/, "");
+      var params = (ctx.plugin && ctx.plugin.attributes && ctx.plugin.attributes.parameters) || {};
+      if (params.translationServerUrl) {
+        serverUrl = params.translationServerUrl.replace(/\/$/, "");
+      }
     } catch (e) {
-      // parameters might not exist
+      // use hardcoded fallback
     }
 
     let locales = ["pl-PL", "en", "ru"];

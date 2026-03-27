@@ -930,10 +930,12 @@
         document.body.innerHTML = '<div style="color:red;padding:16px;">Brak elementu #root</div>';
         return;
       }
-      let serverUrl = "";
+      var serverUrl = "https://datocms-alt-generator.onrender.com";
       try {
-        const params = ctx.plugin && ctx.plugin.attributes && ctx.plugin.attributes.parameters || {};
-        serverUrl = (params.translationServerUrl || "").replace(/\/$/, "");
+        var params = ctx.plugin && ctx.plugin.attributes && ctx.plugin.attributes.parameters || {};
+        if (params.translationServerUrl) {
+          serverUrl = params.translationServerUrl.replace(/\/$/, "");
+        }
       } catch (e) {
       }
       let locales = ["pl-PL", "en", "ru"];
