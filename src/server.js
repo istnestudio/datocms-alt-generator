@@ -205,12 +205,17 @@ app.get("/debug-record/:recordId", async (req, res) => {
     const fields = await client.fields.list(itemTypeId);
     const dastFields = fields.filter(f => f.localized && f.field_type === "structured_text");
 
-    const result = {};
+    const result = {
+      _allKeys: Object.keys(record),
+      _itemType: record.item_type,
+    };
     for (const field of dastFields) {
       const val = record[field.api_key];
-      if (val && val["pl-PL"]) {
-        result[field.api_key] = val["pl-PL"];
-      }
+      result[field.api_key] = {
+        _keys: val ? Object.keys(val) : null,
+        _plPL_keys: val && val["pl-PL"] ? Object.keys(val["pl-PL"]) : null,
+        _plPL_full: val ? val["pl-PL"] : null,
+      };
     }
     res.json(result);
   } catch (e) {
