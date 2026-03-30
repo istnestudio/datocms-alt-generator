@@ -190,6 +190,7 @@ async function translateFullDast(structuredText, sourceLocale, targetLocale, opt
 
   const translated = deepClone(structuredText);
   const blockIdMap = options.blockIdMap || {};
+  const inlineBlocks = options.inlineBlocks || [];
 
   // 1. Translate document tree (spans in paragraphs, headings, etc.)
   if (translated.document && translated.document.children) {
@@ -197,7 +198,7 @@ async function translateFullDast(structuredText, sourceLocale, targetLocale, opt
     const nonBlockCount = translated.document.children.length - blockCount;
     console.log(`   📄 DAST doc: ${nonBlockCount} translatable nodes, ${blockCount} block references`);
 
-    // Replace block IDs with new ones from the map
+    // Replace block IDs with temp IDs from the map
     for (const child of translated.document.children) {
       if (child.type === "block" && child.item && blockIdMap[child.item]) {
         child.item = blockIdMap[child.item];
@@ -205,6 +206,12 @@ async function translateFullDast(structuredText, sourceLocale, targetLocale, opt
     }
 
     await translateDastNode(translated.document, sourceLocale, targetLocale, options);
+  }
+
+  // 2. Include inline blocks in the structured text value
+  if (inlineBlocks.length > 0) {
+    translated.blocks = inlineBlocks;
+    console.log(`   📦 DAST: ${inlineBlocks.length} inline blocks attached`);
   }
 
   return translated;

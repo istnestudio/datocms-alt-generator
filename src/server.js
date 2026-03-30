@@ -281,47 +281,60 @@ async function getBlockTranslatableFields(client) {
 }
 
 /**
- * Clone block records for a target locale, translating text fields.
+ * Build inline block objects for a structured text field value.
  *
- * For each block ID referenced in the source DAST document:
- * 1. Fetch the original block record
- * 2. Translate its text fields
- * 3. Create a new block record (DatoCMS assigns new ID)
- * 4. Return a map of { oldBlockId → newBlockId }
+ * Modular blocks in DatoCMS structured text are NOT standalone records.
+ * They must be included inline in the structured text value when writing:
+ *
+ *   {
+ *     "schema": "dast",
+ *     "document": { ... children with { type: "block", item: "temp-1" } ... },
+ *     "blocks": [
+ *       {
+ *         "type": "item",
+ *         "id": "temp-1",
+ *         "attributes": { "title": "...", ... },
+ *         "relationships": { "item_type": { "data": { "id": "model-id", "type": "item_type" } } }
+ *       }
+ *     ]
+ *   }
  *
  * @param {Object} client - DatoCMS CMA client
- * @param {string[]} blockIds - Array of block record IDs from source document
+ * @param {string[]} blockIds - Block record IDs from source document
  * @param {string} sourceLocale
  * @param {string} targetLocale
  * @param {Object} options
- * @returns {Object} blockIdMap - { oldId: newId }
+ * @returns {Object} { blockIdMap: { oldId: tempId }, inlineBlocks: [ ... ] }
  */
-async function cloneBlocksForLocale(client, blockIds, sourceLocale, targetLocale, options = {}) {
+async function buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, options = {}) {
   const blockIdMap = {};
+  const inlineBlocks = [];
   const translatableFields = await getBlockTranslatableFields(client);
 
-  for (const oldId of blockIds) {
+  for (let i = 0; i < blockIds.length; i++) {
+    const oldId = blockIds[i];
+    const tempId = `temp-block-${i}`;
+
     try {
       const blockRecord = await client.items.find(oldId);
       const itemTypeId = blockRecord.item_type?.id || blockRecord.item_type;
 
-      // Build new block data — copy all fields
-      const blockFields = {};
-      const allKeys = Object.keys(blockRecord);
+      // Build attributes — copy all data fields, skip meta
+      const attributes = {};
       const skipKeys = ["id", "type", "item_type", "meta", "creator"];
 
-      for (const key of allKeys) {
+      for (const key of Object.keys(blockRecord)) {
         if (skipKeys.includes(key)) continue;
-        blockFields[key] = blockRecord[key];
+        attributes[key] = blockRecord[key];
       }
 
       // Translate text fields if this block type has any
       const fieldsToTranslate = translatableFields[itemTypeId] || [];
       for (const fieldKey of fieldsToTranslate) {
-        const value = blockFields[fieldKey];
+        const value = attributes[fieldKey];
         if (value && typeof value === "string" && value.trim()) {
           try {
-            blockFields[fieldKey] = await translateSingleField(
+            attributes[fieldKey] = await translateSingleField(
               value, sourceLocale, targetLocale,
               { ...options, fieldName: `block.${fieldKey}` }
             );
@@ -332,20 +345,26 @@ async function cloneBlocksForLocale(client, blockIds, sourceLocale, targetLocale
         }
       }
 
-      // Create new block record
-      const newBlock = await client.items.create({
-        item_type: { type: "item_type", id: itemTypeId },
-        ...blockFields,
+      // Build inline block object for structured text value
+      inlineBlocks.push({
+        type: "item",
+        id: tempId,
+        attributes,
+        relationships: {
+          item_type: {
+            data: { id: itemTypeId, type: "item_type" },
+          },
+        },
       });
 
-      blockIdMap[oldId] = newBlock.id;
-      console.log(`   ✅ Block cloned: ${oldId} → ${newBlock.id}${fieldsToTranslate.length > 0 ? " (translated)" : " (copied)"}`);
+      blockIdMap[oldId] = tempId;
+      console.log(`   ✅ Block prepared: ${oldId} → ${tempId}${fieldsToTranslate.length > 0 ? " (translated)" : " (copied)"}`);
     } catch (e) {
-      console.error(`   ❌ Block ${oldId} clone failed: ${e.message}`);
+      console.error(`   ❌ Block ${oldId} prepare failed: ${e.message}`);
     }
   }
 
-  return blockIdMap;
+  return { blockIdMap, inlineBlocks };
 }
 
 // ══════════════════════════════════════════════
@@ -538,17 +557,17 @@ app.post("/translate-record", async (req, res) => {
 
         console.log(`   📦 DAST "${fieldApiKey}": ${blockIds.length} blocks to clone`);
 
-        // For each target locale: clone blocks, then translate document
+        // For each target locale: build inline blocks, then translate document
         const perLocale = {};
         for (const targetLocale of targetLocales) {
-          // Clone blocks for this locale (creates new block records, translates text fields)
-          const blockIdMap = blockIds.length > 0
-            ? await cloneBlocksForLocale(client, blockIds, sourceLocale, targetLocale, { modelName, fieldName: fieldApiKey })
-            : {};
+          // Build inline blocks (fetch originals, translate text, build inline objects)
+          const { blockIdMap, inlineBlocks } = blockIds.length > 0
+            ? await buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, { modelName, fieldName: fieldApiKey })
+            : { blockIdMap: {}, inlineBlocks: [] };
 
-          // Translate document tree with block ID mapping
+          // Translate document tree with block ID mapping + inline blocks
           const translated = await translateStructuredTextField(
-            sourceDast, sourceLocale, [targetLocale], { modelName, fieldName: fieldApiKey, blockIdMap }
+            sourceDast, sourceLocale, [targetLocale], { modelName, fieldName: fieldApiKey, blockIdMap, inlineBlocks }
           );
           perLocale[targetLocale] = translated[targetLocale];
         }
@@ -797,11 +816,11 @@ app.post("/bulk-translate", async (req, res) => {
 
               const perLocale = {};
               for (const targetLocale of targetLocales) {
-                const blockIdMap = blockIds.length > 0
-                  ? await cloneBlocksForLocale(client, blockIds, sourceLocale, targetLocale, { modelName: model.api_key, fieldName: apiKey })
-                  : {};
+                const { blockIdMap, inlineBlocks } = blockIds.length > 0
+                  ? await buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, { modelName: model.api_key, fieldName: apiKey })
+                  : { blockIdMap: {}, inlineBlocks: [] };
                 const translated = await translateStructuredTextField(
-                  sourceDast, sourceLocale, [targetLocale], { modelName: model.api_key, fieldName: apiKey, blockIdMap }
+                  sourceDast, sourceLocale, [targetLocale], { modelName: model.api_key, fieldName: apiKey, blockIdMap, inlineBlocks }
                 );
                 perLocale[targetLocale] = translated[targetLocale];
               }
