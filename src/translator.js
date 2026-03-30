@@ -171,28 +171,40 @@ const TRANSLATABLE_BLOCK_FIELDS = {
  * @param {Object} options
  * @returns {Object} - Translated structured text value
  */
+/**
+ * Translate a full DatoCMS Structured Text value.
+ *
+ * Handles document tree (paragraphs, headings, lists) translation.
+ * Block handling is done externally by server.js which has CMA client access
+ * to fetch block records and create new ones.
+ *
+ * @param {Object} structuredText - { schema, document, blocks?, links? }
+ * @param {string} sourceLocale
+ * @param {string} targetLocale
+ * @param {Object} options
+ * @param {Object} options.blockIdMap - Map of old block IDs → new block IDs (from server.js)
+ * @returns {Object} - Translated structured text value with updated block references
+ */
 async function translateFullDast(structuredText, sourceLocale, targetLocale, options = {}) {
   if (!structuredText) return structuredText;
 
   const translated = deepClone(structuredText);
+  const blockIdMap = options.blockIdMap || {};
 
   // 1. Translate document tree (spans in paragraphs, headings, etc.)
-  // Block nodes ({ type: "block", item: "ID" }) are KEPT — they reference shared
-  // block records that are the same across all locales.
   if (translated.document && translated.document.children) {
     const blockCount = translated.document.children.filter(c => c.type === "block").length;
     const nonBlockCount = translated.document.children.length - blockCount;
-    console.log(`   📄 DAST doc: ${nonBlockCount} translatable nodes, ${blockCount} block references (kept)`);
+    console.log(`   📄 DAST doc: ${nonBlockCount} translatable nodes, ${blockCount} block references`);
+
+    // Replace block IDs with new ones from the map
+    for (const child of translated.document.children) {
+      if (child.type === "block" && child.item && blockIdMap[child.item]) {
+        child.item = blockIdMap[child.item];
+      }
+    }
 
     await translateDastNode(translated.document, sourceLocale, targetLocale, options);
-  }
-
-  // 2. Translate inline blocks in the blocks array (if any exist in the ST value)
-  if (translated.blocks && Array.isArray(translated.blocks) && translated.blocks.length > 0) {
-    console.log(`   📦 DAST: ${translated.blocks.length} inline blocks to translate`);
-    for (const block of translated.blocks) {
-      await translateBlock(block, sourceLocale, targetLocale, options);
-    }
   }
 
   return translated;
