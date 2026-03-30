@@ -652,8 +652,71 @@ app.post("/translate-record", async (req, res) => {
       }
     }
 
-    // Save to DatoCMS
-    await client.items.update(recordId, updatePayload);
+    // Collect all inline blocks from DAST translations
+    const allInlineBlocks = [];
+    for (const [apiKey, localeData] of Object.entries(dastTranslations)) {
+      for (const locale of targetLocales) {
+        const stValue = localeData[locale];
+        if (stValue && stValue.blocks && Array.isArray(stValue.blocks)) {
+          allInlineBlocks.push(...stValue.blocks);
+          // Remove blocks from the field value — they go in "included" instead
+          delete stValue.blocks;
+        }
+      }
+    }
+
+    if (allInlineBlocks.length > 0) {
+      console.log(`   📦 Total inline blocks to create: ${allInlineBlocks.length}`);
+    }
+
+    // Save to DatoCMS — use raw API if we have blocks to create
+    if (allInlineBlocks.length > 0) {
+      // Build JSON:API payload with "included" for new block records
+      const jsonApiPayload = {
+        data: {
+          type: "item",
+          id: recordId,
+          attributes: updatePayload,
+        },
+        included: allInlineBlocks.map((block) => ({
+          type: "item",
+          id: block.id,
+          attributes: (() => {
+            const attrs = { ...block };
+            delete attrs.id;
+            delete attrs.type;
+            delete attrs.item_type;
+            return attrs;
+          })(),
+          relationships: {
+            item_type: {
+              data: { type: "item_type", id: block.item_type.id },
+            },
+          },
+        })),
+      };
+
+      console.log(`   🔧 Using raw API with ${jsonApiPayload.included.length} included blocks`);
+
+      const apiToken = process.env.DATOCMS_API_TOKEN;
+      const response = await fetch(`https://site-api.datocms.com/items/${recordId}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/vnd.api+json",
+          "Authorization": `Bearer ${apiToken}`,
+          "X-Api-Version": "3",
+        },
+        body: JSON.stringify(jsonApiPayload),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`PUT items/${recordId}: ${response.status} ${response.statusText}\n${errorBody}`);
+      }
+    } else {
+      // No blocks — use CMA client as before
+      await client.items.update(recordId, updatePayload);
+    }
 
     const translatedCount = totalToTranslate;
     console.log(`✅ Record ${recordId}: ${translatedCount} fields translated and saved`);
