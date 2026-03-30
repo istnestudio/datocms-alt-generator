@@ -346,15 +346,12 @@ async function buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, o
       }
 
       // Build inline block object for structured text value
+      // CMA client v3 uses simplified format (not JSON:API)
       inlineBlocks.push({
-        type: "item",
         id: tempId,
-        attributes,
-        relationships: {
-          item_type: {
-            data: { id: itemTypeId, type: "item_type" },
-          },
-        },
+        type: "item",
+        item_type: { id: itemTypeId, type: "item_type" },
+        ...attributes,
       });
 
       blockIdMap[oldId] = tempId;
