@@ -5,6 +5,7 @@ const path = require("path");
 const { processAsset } = require("./alt-generator");
 const { getDatocmsClient } = require("./datocms-client");
 const { translateFields, translateStructuredTextField, translateSeoField, translateSingleField } = require("./translator");
+const { buildBlockRecord } = require("@datocms/cma-client-node");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -194,56 +195,6 @@ app.get("/stats", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// ── DEBUG: dump record structured text fields ──
-// ══════════════════════════════════════════════
-
-app.get("/debug-record/:recordId", async (req, res) => {
-  try {
-    const client = getDatocmsClient();
-    const record = await client.items.find(req.params.recordId);
-    const itemTypeId = record.item_type ? record.item_type.id : record.relationships?.item_type?.data?.id;
-    const fields = await client.fields.list(itemTypeId);
-    const dastFields = fields.filter(f => f.localized && f.field_type === "structured_text");
-
-    const result = {
-      _allKeys: Object.keys(record),
-      _itemType: record.item_type,
-    };
-    for (const field of dastFields) {
-      const val = record[field.api_key];
-      result[field.api_key] = {
-        _keys: val ? Object.keys(val) : null,
-        _plPL_keys: val && val["pl-PL"] ? Object.keys(val["pl-PL"]) : null,
-        _plPL_full: val ? val["pl-PL"] : null,
-      };
-
-      // Fetch referenced block records
-      const doc = val && val["pl-PL"] ? val["pl-PL"].document : null;
-      if (doc && doc.children) {
-        const blockNodes = doc.children.filter(c => c.type === "block");
-        const blockRecords = [];
-        for (const bn of blockNodes.slice(0, 3)) { // first 3 blocks max
-          try {
-            const blockRecord = await client.items.find(bn.item);
-            blockRecords.push({
-              id: bn.item,
-              _allKeys: Object.keys(blockRecord),
-              _full: blockRecord,
-            });
-          } catch (e) {
-            blockRecords.push({ id: bn.item, error: e.message });
-          }
-        }
-        result[field.api_key]._blockRecords = blockRecords;
-      }
-    }
-    res.json(result);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ══════════════════════════════════════════════
 // ── BLOCK CLONING HELPERS ──
 // ══════════════════════════════════════════════
 
@@ -306,7 +257,7 @@ async function getBlockTranslatableFields(client) {
  * @param {Object} options
  * @returns {Object} { blockIdMap: { oldId: tempId }, inlineBlocks: [ ... ] }
  */
-async function buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, options = {}) {
+async function buildInlineBlocksForLocale(client, blockIds, sourceLocale, targetLocale, options = {}) {
   const blockIdMap = {};
   const inlineBlocks = [];
   const translatableFields = await getBlockTranslatableFields(client);
@@ -319,22 +270,22 @@ async function buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, o
       const blockRecord = await client.items.find(oldId);
       const itemTypeId = blockRecord.item_type?.id || blockRecord.item_type;
 
-      // Build attributes — copy all data fields, skip meta
-      const attributes = {};
+      // Collect data fields (skip meta keys)
+      const blockData = {};
       const skipKeys = ["id", "type", "item_type", "meta", "creator"];
 
       for (const key of Object.keys(blockRecord)) {
         if (skipKeys.includes(key)) continue;
-        attributes[key] = blockRecord[key];
+        blockData[key] = blockRecord[key];
       }
 
       // Translate text fields if this block type has any
       const fieldsToTranslate = translatableFields[itemTypeId] || [];
       for (const fieldKey of fieldsToTranslate) {
-        const value = attributes[fieldKey];
+        const value = blockData[fieldKey];
         if (value && typeof value === "string" && value.trim()) {
           try {
-            attributes[fieldKey] = await translateSingleField(
+            blockData[fieldKey] = await translateSingleField(
               value, sourceLocale, targetLocale,
               { ...options, fieldName: `block.${fieldKey}` }
             );
@@ -345,16 +296,17 @@ async function buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, o
         }
       }
 
-      // Build inline block object for structured text value
-      // CMA client v3 uses simplified format (not JSON:API)
-      inlineBlocks.push({
-        id: tempId,
-        type: "item",
-        item_type: { id: itemTypeId, type: "item_type" },
-        ...attributes,
+      // Use buildBlockRecord to produce correct JSON:API format for CMA client
+      const inlineBlock = buildBlockRecord({
+        item_type: { type: "item_type", id: itemTypeId },
+        ...blockData,
       });
 
       blockIdMap[oldId] = tempId;
+      // Attach temp ID so the document tree can reference this block
+      inlineBlock.id = tempId;
+      inlineBlocks.push(inlineBlock);
+
       console.log(`   ✅ Block prepared: ${oldId} → ${tempId}${fieldsToTranslate.length > 0 ? " (translated)" : " (copied)"}`);
     } catch (e) {
       console.error(`   ❌ Block ${oldId} prepare failed: ${e.message}`);
@@ -476,23 +428,11 @@ app.post("/translate-record", async (req, res) => {
     const sourceDastFields = {};
     for (const field of localizedDastFields) {
       const fieldValue = record[field.api_key];
-      console.log(`   🔍 DAST field "${field.api_key}": fieldValue type=${typeof fieldValue}, isNull=${fieldValue === null}`);
       if (!fieldValue || typeof fieldValue !== "object") continue;
 
       const sourceDast = fieldValue[sourceLocale];
       const doc = sourceDast?.document;
       const blocksCount = sourceDast?.blocks?.length || 0;
-      console.log(`   🔍 DAST "${field.api_key}" sourceLocale=${sourceLocale}: keys=${sourceDast ? Object.keys(sourceDast).join(",") : "null"}, docChildren=${doc?.children?.length || 0}, blocks=${blocksCount}`);
-      // Debug: log block nodes in document tree and first block details
-      if (doc?.children) {
-        const blockNodes = doc.children.filter(c => c.type === "block");
-        if (blockNodes.length > 0) {
-          console.log(`   🔍 DAST "${field.api_key}": ${blockNodes.length} block nodes in document tree, first: ${JSON.stringify(blockNodes[0]).substring(0, 200)}`);
-        }
-        // Log unique child types
-        const types = [...new Set(doc.children.map(c => c.type))];
-        console.log(`   🔍 DAST "${field.api_key}" child types: ${types.join(", ")}`);
-      }
       if (!sourceDast || !doc || (!doc.children?.length && !blocksCount)) continue;
 
       const targetsMissing = targetLocales.some((l) => {
@@ -509,11 +449,9 @@ app.post("/translate-record", async (req, res) => {
     const sourceSeoFields = {};
     for (const field of localizedSeoFields) {
       const fieldValue = record[field.api_key];
-      console.log(`   🔍 SEO field "${field.api_key}": fieldValue type=${typeof fieldValue}, isNull=${fieldValue === null}`);
       if (!fieldValue || typeof fieldValue !== "object") continue;
 
       const sourceSeo = fieldValue[sourceLocale];
-      console.log(`   🔍 SEO "${field.api_key}" sourceLocale=${sourceLocale}: ${sourceSeo ? JSON.stringify(sourceSeo).substring(0, 200) : "null"}`);
       if (!sourceSeo) continue;
 
       // Check if there's anything to translate (title or description)
@@ -557,9 +495,9 @@ app.post("/translate-record", async (req, res) => {
         // For each target locale: build inline blocks, then translate document
         const perLocale = {};
         for (const targetLocale of targetLocales) {
-          // Build inline blocks (fetch originals, translate text, build inline objects)
+          // Build inline blocks (fetch originals, translate text, build JSON:API objects via buildBlockRecord)
           const { blockIdMap, inlineBlocks } = blockIds.length > 0
-            ? await buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, { modelName, fieldName: fieldApiKey })
+            ? await buildInlineBlocksForLocale(client, blockIds, sourceLocale, targetLocale, { modelName, fieldName: fieldApiKey })
             : { blockIdMap: {}, inlineBlocks: [] };
 
           // Translate document tree with block ID mapping + inline blocks
@@ -652,72 +590,9 @@ app.post("/translate-record", async (req, res) => {
       }
     }
 
-    // Collect all inline blocks from DAST translations
-    const allInlineBlocks = [];
-    for (const [apiKey, localeData] of Object.entries(dastTranslations)) {
-      for (const locale of targetLocales) {
-        const stValue = localeData[locale];
-        if (stValue && stValue.blocks && Array.isArray(stValue.blocks)) {
-          allInlineBlocks.push(...stValue.blocks);
-          // Remove blocks from the field value — they go in "included" instead
-          delete stValue.blocks;
-        }
-      }
-    }
-
-    if (allInlineBlocks.length > 0) {
-      console.log(`   📦 Total inline blocks to create: ${allInlineBlocks.length}`);
-    }
-
-    // Save to DatoCMS — use raw API if we have blocks to create
-    if (allInlineBlocks.length > 0) {
-      // Build JSON:API payload with "included" for new block records
-      const jsonApiPayload = {
-        data: {
-          type: "item",
-          id: recordId,
-          attributes: updatePayload,
-        },
-        included: allInlineBlocks.map((block) => ({
-          type: "item",
-          id: block.id,
-          attributes: (() => {
-            const attrs = { ...block };
-            delete attrs.id;
-            delete attrs.type;
-            delete attrs.item_type;
-            return attrs;
-          })(),
-          relationships: {
-            item_type: {
-              data: { type: "item_type", id: block.item_type.id },
-            },
-          },
-        })),
-      };
-
-      console.log(`   🔧 Using raw API with ${jsonApiPayload.included.length} included blocks`);
-
-      const apiToken = process.env.DATOCMS_API_TOKEN;
-      const response = await fetch(`https://site-api.datocms.com/items/${recordId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/vnd.api+json",
-          "Accept": "application/json",
-          "Authorization": `Bearer ${apiToken}`,
-          "X-Api-Version": "3",
-        },
-        body: JSON.stringify(jsonApiPayload),
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(`PUT items/${recordId}: ${response.status} ${response.statusText}\n${errorBody}`);
-      }
-    } else {
-      // No blocks — use CMA client as before
-      await client.items.update(recordId, updatePayload);
-    }
+    // Save to DatoCMS — blocks are embedded in ST field values via buildBlockRecord format
+    // The CMA client handles JSON:API serialization automatically
+    await client.items.update(recordId, updatePayload);
 
     const translatedCount = totalToTranslate;
     console.log(`✅ Record ${recordId}: ${translatedCount} fields translated and saved`);
@@ -878,7 +753,7 @@ app.post("/bulk-translate", async (req, res) => {
               const perLocale = {};
               for (const targetLocale of targetLocales) {
                 const { blockIdMap, inlineBlocks } = blockIds.length > 0
-                  ? await buildInlineBlocks(client, blockIds, sourceLocale, targetLocale, { modelName: model.api_key, fieldName: apiKey })
+                  ? await buildInlineBlocksForLocale(client, blockIds, sourceLocale, targetLocale, { modelName: model.api_key, fieldName: apiKey })
                   : { blockIdMap: {}, inlineBlocks: [] };
                 const translated = await translateStructuredTextField(
                   sourceDast, sourceLocale, [targetLocale], { modelName: model.api_key, fieldName: apiKey, blockIdMap, inlineBlocks }
