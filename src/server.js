@@ -703,6 +703,7 @@ app.post("/translate-record", async (req, res) => {
         method: "PUT",
         headers: {
           "Content-Type": "application/vnd.api+json",
+          "Accept": "application/json",
           "Authorization": `Bearer ${apiToken}`,
           "X-Api-Version": "3",
         },
