@@ -4,8 +4,7 @@ const crypto = require("crypto");
 const path = require("path");
 const { processAsset } = require("./alt-generator");
 const { getDatocmsClient } = require("./datocms-client");
-const { translateFields, translateStructuredTextField, translateSeoField, translateSingleField } = require("./translator");
-const { buildBlockRecord } = require("@datocms/cma-client-node");
+const { translateFields, translateStructuredTextField, translateSeoField } = require("./translator");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -195,126 +194,21 @@ app.get("/stats", async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// ── BLOCK CLONING HELPERS ──
+// ── BLOCK HANDLING ──
 // ══════════════════════════════════════════════
 
 /**
- * Block fields that should be translated per block item_type ID.
- * Maps item_type.id → array of field API keys to translate.
- * Built dynamically on first use by scanning block models.
- */
-let blockFieldsCache = null;
-
-/**
- * Auto-detect translatable text fields for all block models.
- * Returns { itemTypeId: ["title", "description", ...] }
- */
-async function getBlockTranslatableFields(client) {
-  if (blockFieldsCache) return blockFieldsCache;
-
-  blockFieldsCache = {};
-  try {
-    const allItemTypes = await client.itemTypes.list();
-    const blockTypes = allItemTypes.filter(t => t.modular_block);
-
-    for (const bt of blockTypes) {
-      const fields = await client.fields.list(bt.id);
-      const textFields = fields.filter(f => ["string", "text"].includes(f.field_type));
-      if (textFields.length > 0) {
-        blockFieldsCache[bt.id] = textFields.map(f => f.api_key);
-        console.log(`   📦 Block model "${bt.api_key}" (${bt.id}): translatable fields = [${blockFieldsCache[bt.id].join(", ")}]`);
-      }
-    }
-  } catch (e) {
-    console.error(`   ⚠️  Failed to scan block models: ${e.message}`);
-  }
-  return blockFieldsCache;
-}
-
-/**
- * Build inline block objects for a structured text field value.
+ * In DatoCMS, block records in structured text belong to the parent record,
+ * NOT to a specific locale. Block fields are non-localized (flat strings).
  *
- * Modular blocks in DatoCMS structured text are NOT standalone records.
- * They must be included inline in the structured text value when writing:
+ * This means:
+ * - The SAME block IDs can be referenced from any locale's DAST document
+ * - We do NOT need to create new blocks for translated locales
+ * - Block content (titles, descriptions) stays in the source language
+ * - Only the DAST document tree text (paragraphs, headings, lists) gets translated
  *
- *   {
- *     "schema": "dast",
- *     "document": { ... children with { type: "block", item: "temp-1" } ... },
- *     "blocks": [
- *       {
- *         "type": "item",
- *         "id": "temp-1",
- *         "attributes": { "title": "...", ... },
- *         "relationships": { "item_type": { "data": { "id": "model-id", "type": "item_type" } } }
- *       }
- *     ]
- *   }
- *
- * @param {Object} client - DatoCMS CMA client
- * @param {string[]} blockIds - Block record IDs from source document
- * @param {string} sourceLocale
- * @param {string} targetLocale
- * @param {Object} options
- * @returns {Object} { blockIdMap: { oldId: tempId }, inlineBlocks: [ ... ] }
+ * The translated DAST simply reuses the original block references.
  */
-async function buildInlineBlocksForLocale(client, blockIds, sourceLocale, targetLocale, options = {}) {
-  const blockIdMap = {};
-  const inlineBlocks = [];
-  const translatableFields = await getBlockTranslatableFields(client);
-
-  for (let i = 0; i < blockIds.length; i++) {
-    const oldId = blockIds[i];
-    const tempId = `temp-block-${i}`;
-
-    try {
-      const blockRecord = await client.items.find(oldId);
-      const itemTypeId = blockRecord.item_type?.id || blockRecord.item_type;
-
-      // Collect data fields (skip meta keys)
-      const blockData = {};
-      const skipKeys = ["id", "type", "item_type", "meta", "creator"];
-
-      for (const key of Object.keys(blockRecord)) {
-        if (skipKeys.includes(key)) continue;
-        blockData[key] = blockRecord[key];
-      }
-
-      // Translate text fields if this block type has any
-      const fieldsToTranslate = translatableFields[itemTypeId] || [];
-      for (const fieldKey of fieldsToTranslate) {
-        const value = blockData[fieldKey];
-        if (value && typeof value === "string" && value.trim()) {
-          try {
-            blockData[fieldKey] = await translateSingleField(
-              value, sourceLocale, targetLocale,
-              { ...options, fieldName: `block.${fieldKey}` }
-            );
-            console.log(`      📝 Block ${oldId} "${fieldKey}": translated`);
-          } catch (e) {
-            console.error(`      ⚠️  Block ${oldId} "${fieldKey}": translate failed — ${e.message}`);
-          }
-        }
-      }
-
-      // Use buildBlockRecord to produce correct JSON:API format for CMA client
-      const inlineBlock = buildBlockRecord({
-        item_type: { type: "item_type", id: itemTypeId },
-        ...blockData,
-      });
-
-      blockIdMap[oldId] = tempId;
-      // Attach temp ID so the document tree can reference this block
-      inlineBlock.id = tempId;
-      inlineBlocks.push(inlineBlock);
-
-      console.log(`   ✅ Block prepared: ${oldId} → ${tempId}${fieldsToTranslate.length > 0 ? " (translated)" : " (copied)"}`);
-    } catch (e) {
-      console.error(`   ❌ Block ${oldId} prepare failed: ${e.message}`);
-    }
-  }
-
-  return { blockIdMap, inlineBlocks };
-}
 
 // ══════════════════════════════════════════════
 // ── TRANSLATION ENDPOINTS ──
@@ -481,33 +375,19 @@ app.post("/translate-record", async (req, res) => {
       ? await translateFields(sourceFields, sourceLocale, targetLocales, { modelName })
       : {};
 
-    // ── Translate DAST fields (with block cloning) ──
+    // ── Translate DAST fields ──
+    // Block records are shared across locales (same IDs), so we just translate
+    // the document tree text and keep block references unchanged.
     const dastTranslations = {}; // { fieldApiKey: { en: <DAST>, ru: <DAST> } }
     for (const [fieldApiKey, sourceDast] of Object.entries(sourceDastFields)) {
       try {
-        // Find all block IDs in the document
-        const blockIds = (sourceDast.document?.children || [])
-          .filter(c => c.type === "block" && c.item)
-          .map(c => c.item);
+        const blockCount = (sourceDast.document?.children || []).filter(c => c.type === "block").length;
+        console.log(`   📄 DAST "${fieldApiKey}": translating document tree (${blockCount} blocks kept as-is)`);
 
-        console.log(`   📦 DAST "${fieldApiKey}": ${blockIds.length} blocks to clone`);
-
-        // For each target locale: build inline blocks, then translate document
-        const perLocale = {};
-        for (const targetLocale of targetLocales) {
-          // Build inline blocks (fetch originals, translate text, build JSON:API objects via buildBlockRecord)
-          const { blockIdMap, inlineBlocks } = blockIds.length > 0
-            ? await buildInlineBlocksForLocale(client, blockIds, sourceLocale, targetLocale, { modelName, fieldName: fieldApiKey })
-            : { blockIdMap: {}, inlineBlocks: [] };
-
-          // Translate document tree with block ID mapping + inline blocks
-          const translated = await translateStructuredTextField(
-            sourceDast, sourceLocale, [targetLocale], { modelName, fieldName: fieldApiKey, blockIdMap, inlineBlocks }
-          );
-          perLocale[targetLocale] = translated[targetLocale];
-        }
-
-        dastTranslations[fieldApiKey] = perLocale;
+        // Translate document tree — blocks stay with original IDs
+        dastTranslations[fieldApiKey] = await translateStructuredTextField(
+          sourceDast, sourceLocale, targetLocales, { modelName, fieldName: fieldApiKey }
+        );
       } catch (e) {
         console.error(`  ⚠️  DAST field ${fieldApiKey} translation failed: ${e.message}`);
       }
@@ -590,8 +470,7 @@ app.post("/translate-record", async (req, res) => {
       }
     }
 
-    // Save to DatoCMS — blocks are embedded in ST field values via buildBlockRecord format
-    // The CMA client handles JSON:API serialization automatically
+    // Save to DatoCMS
     await client.items.update(recordId, updatePayload);
 
     const translatedCount = totalToTranslate;
@@ -742,25 +621,13 @@ app.post("/bulk-translate", async (req, res) => {
             ? await translateFields(sourceTextFields, sourceLocale, targetLocales, { modelName: model.api_key })
             : {};
 
-          // Translate DAST fields (with block cloning)
+          // Translate DAST fields — blocks are shared across locales, keep original IDs
           const dastTranslations = {};
           for (const [apiKey, sourceDast] of Object.entries(sourceDastFields)) {
             try {
-              const blockIds = (sourceDast.document?.children || [])
-                .filter(c => c.type === "block" && c.item)
-                .map(c => c.item);
-
-              const perLocale = {};
-              for (const targetLocale of targetLocales) {
-                const { blockIdMap, inlineBlocks } = blockIds.length > 0
-                  ? await buildInlineBlocksForLocale(client, blockIds, sourceLocale, targetLocale, { modelName: model.api_key, fieldName: apiKey })
-                  : { blockIdMap: {}, inlineBlocks: [] };
-                const translated = await translateStructuredTextField(
-                  sourceDast, sourceLocale, [targetLocale], { modelName: model.api_key, fieldName: apiKey, blockIdMap, inlineBlocks }
-                );
-                perLocale[targetLocale] = translated[targetLocale];
-              }
-              dastTranslations[apiKey] = perLocale;
+              dastTranslations[apiKey] = await translateStructuredTextField(
+                sourceDast, sourceLocale, targetLocales, { modelName: model.api_key, fieldName: apiKey }
+              );
             } catch (e) {
               console.error(`   ⚠️  DAST ${apiKey}: ${e.message}`);
             }

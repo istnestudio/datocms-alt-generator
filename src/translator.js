@@ -182,36 +182,22 @@ const TRANSLATABLE_BLOCK_FIELDS = {
  * @param {string} sourceLocale
  * @param {string} targetLocale
  * @param {Object} options
- * @param {Object} options.blockIdMap - Map of old block IDs → new block IDs (from server.js)
- * @returns {Object} - Translated structured text value with updated block references
+ * @returns {Object} - Translated structured text value with original block references preserved
  */
 async function translateFullDast(structuredText, sourceLocale, targetLocale, options = {}) {
   if (!structuredText) return structuredText;
 
   const translated = deepClone(structuredText);
-  const blockIdMap = options.blockIdMap || {};
-  const inlineBlocks = options.inlineBlocks || [];
 
-  // 1. Translate document tree (spans in paragraphs, headings, etc.)
+  // Translate document tree (spans in paragraphs, headings, etc.)
+  // Block references ({ type: "block", item: "blockId" }) are kept as-is —
+  // block records are shared across locales in DatoCMS
   if (translated.document && translated.document.children) {
     const blockCount = translated.document.children.filter(c => c.type === "block").length;
     const nonBlockCount = translated.document.children.length - blockCount;
-    console.log(`   📄 DAST doc: ${nonBlockCount} translatable nodes, ${blockCount} block references`);
-
-    // Replace block IDs with temp IDs from the map
-    for (const child of translated.document.children) {
-      if (child.type === "block" && child.item && blockIdMap[child.item]) {
-        child.item = blockIdMap[child.item];
-      }
-    }
+    console.log(`   📄 DAST doc: ${nonBlockCount} translatable nodes, ${blockCount} block refs (kept)`);
 
     await translateDastNode(translated.document, sourceLocale, targetLocale, options);
-  }
-
-  // 2. Include inline blocks in the structured text value
-  if (inlineBlocks.length > 0) {
-    translated.blocks = inlineBlocks;
-    console.log(`   📦 DAST: ${inlineBlocks.length} inline blocks attached`);
   }
 
   return translated;
