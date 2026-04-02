@@ -182,20 +182,28 @@ const TRANSLATABLE_BLOCK_FIELDS = {
  * @param {string} sourceLocale
  * @param {string} targetLocale
  * @param {Object} options
- * @returns {Object} - Translated structured text value with original block references preserved
+ * @returns {Object} - Translated structured text value (blocks stripped — DatoCMS API cannot create blocks per-locale via items.update)
  */
 async function translateFullDast(structuredText, sourceLocale, targetLocale, options = {}) {
   if (!structuredText) return structuredText;
 
   const translated = deepClone(structuredText);
 
-  // Translate document tree (spans in paragraphs, headings, etc.)
-  // Block references ({ type: "block", item: "blockId" }) are kept as-is —
-  // block records are shared across locales in DatoCMS
   if (translated.document && translated.document.children) {
     const blockCount = translated.document.children.filter(c => c.type === "block").length;
-    const nonBlockCount = translated.document.children.length - blockCount;
-    console.log(`   📄 DAST doc: ${nonBlockCount} translatable nodes, ${blockCount} block refs (kept)`);
+
+    // Remove block nodes — DatoCMS API does not support creating new block records
+    // per-locale via items.update(). Block content must be added manually in the CMS UI.
+    if (blockCount > 0) {
+      translated.document.children = translated.document.children.filter(c => c.type !== "block");
+      console.log(`   📄 DAST doc: ${translated.document.children.length} translatable nodes (${blockCount} blocks stripped — API limitation)`);
+    } else {
+      console.log(`   📄 DAST doc: ${translated.document.children.length} translatable nodes`);
+    }
+
+    // Remove blocks/links arrays (they reference block records that don't exist in this locale)
+    delete translated.blocks;
+    delete translated.links;
 
     await translateDastNode(translated.document, sourceLocale, targetLocale, options);
   }
