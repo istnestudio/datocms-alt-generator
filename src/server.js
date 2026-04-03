@@ -198,17 +198,27 @@ app.get("/stats", async (req, res) => {
 // ══════════════════════════════════════════════
 
 /**
- * In DatoCMS, block records in structured text belong to the parent record,
- * NOT to a specific locale. Block fields are non-localized (flat strings).
+ * DatoCMS block records in structured text are PER-LOCALE — each locale
+ * has its own block records with unique IDs.
  *
- * This means:
- * - The SAME block IDs can be referenced from any locale's DAST document
- * - We do NOT need to create new blocks for translated locales
- * - Block content (titles, descriptions) stays in the source language
- * - Only the DAST document tree text (paragraphs, headings, lists) gets translated
+ * To create blocks for translated locales, we:
+ * 1. Fetch records with `nested: true` so blocks are full JSON:API objects
+ * 2. Clone each block WITHOUT its `id` for the target locale
+ * 3. Translate text fields in the block's attributes
+ * 4. The DatoCMS API creates new block records automatically on save
  *
- * The translated DAST simply reuses the original block references.
+ * This is handled by `processBlockNodes()` in translator.js.
  */
+
+function countInlineItems(node) {
+  if (!node || !node.children) return 0;
+  let count = 0;
+  for (const child of node.children) {
+    if (child.type === "inlineItem") count++;
+    if (child.children) count += countInlineItems(child);
+  }
+  return count;
+}
 
 // ══════════════════════════════════════════════
 // ── TRANSLATION ENDPOINTS ──
@@ -261,8 +271,8 @@ app.post("/translate-record", async (req, res) => {
   try {
     const client = getDatocmsClient();
 
-    // Fetch the record
-    const record = await client.items.find(recordId);
+    // Fetch the record with nested: true to get full block data in structured text fields
+    const record = await client.items.find(recordId, { nested: true });
     if (!record) {
       return res.status(404).json({ error: "Record not found" });
     }
@@ -376,15 +386,15 @@ app.post("/translate-record", async (req, res) => {
       : {};
 
     // ── Translate DAST fields ──
-    // Block records are shared across locales (same IDs), so we just translate
-    // the document tree text and keep block references unchanged.
+    // Blocks are cloned without IDs so the API creates new per-locale block records.
+    // Text fields inside blocks are translated. Record must be fetched with nested:true.
     const dastTranslations = {}; // { fieldApiKey: { en: <DAST>, ru: <DAST> } }
     for (const [fieldApiKey, sourceDast] of Object.entries(sourceDastFields)) {
       try {
         const blockCount = (sourceDast.document?.children || []).filter(c => c.type === "block").length;
-        console.log(`   📄 DAST "${fieldApiKey}": translating document tree (${blockCount} blocks kept as-is)`);
+        const inlineCount = countInlineItems(sourceDast.document);
+        console.log(`   📄 DAST "${fieldApiKey}": ${blockCount} blocks, ${inlineCount} inline items — translating with block cloning`);
 
-        // Translate document tree — blocks stay with original IDs
         dastTranslations[fieldApiKey] = await translateStructuredTextField(
           sourceDast, sourceLocale, targetLocales, { modelName, fieldName: fieldApiKey }
         );
@@ -621,7 +631,7 @@ app.post("/bulk-translate", async (req, res) => {
             ? await translateFields(sourceTextFields, sourceLocale, targetLocales, { modelName: model.api_key })
             : {};
 
-          // Translate DAST fields — blocks are shared across locales, keep original IDs
+          // Translate DAST fields — blocks are cloned without IDs for new per-locale records
           const dastTranslations = {};
           for (const [apiKey, sourceDast] of Object.entries(sourceDastFields)) {
             try {

@@ -150,39 +150,41 @@ function deepClone(obj) {
 }
 
 /**
- * Block types that need specific fields translated.
- * Key = block model API key, Value = array of field API keys to translate.
+ * Known text fields in blocks that should be translated.
+ * These are field API keys commonly used in DatoCMS block models.
  */
-const TRANSLATABLE_BLOCK_FIELDS = {
-  data1: ["title", "description", "link_name"],
-  text_accordion: ["title", "description"],
-  button: ["title"],
-};
+const KNOWN_TRANSLATABLE_BLOCK_FIELDS = [
+  "title", "description", "link_name", "text", "label", "content",
+  "heading", "subtitle", "button_text", "cta_text", "name",
+  "alt_text", "caption", "placeholder", "tooltip",
+];
 
 /**
- * Translate a full DatoCMS Structured Text field value.
- *
- * Input: { schema: "dast", document: { type: "root", children: [...] }, blocks: [...], links: [...] }
- * Output: same structure with translated spans + translated block fields.
- *
- * @param {Object} structuredText - Full structured text value (schema + document + blocks + links)
- * @param {string} sourceLocale
- * @param {string} targetLocale
- * @param {Object} options
- * @returns {Object} - Translated structured text value
+ * Field name patterns that should NOT be translated (URLs, IDs, technical values).
  */
+const NON_TRANSLATABLE_PATTERNS = [
+  /^(id|url|href|link|src|slug|api_key|css_class|icon|color|type|target|rel)$/i,
+  /_id$/i,
+  /_url$/i,
+  /_href$/i,
+];
+
 /**
  * Translate a full DatoCMS Structured Text value.
  *
- * Handles document tree (paragraphs, headings, lists) translation.
- * Block handling is done externally by server.js which has CMA client access
- * to fetch block records and create new ones.
+ * Handles:
+ * 1. Block nodes — clones each block WITHOUT its ID so the API creates new per-locale
+ *    block records. Translates text fields inside block attributes.
+ * 2. Document tree — translates text spans in paragraphs, headings, lists, etc.
+ *
+ * IMPORTANT: The record must be fetched with `nested: true` so that block nodes
+ * contain full JSON:API objects (not just string IDs).
  *
  * @param {Object} structuredText - { schema, document, blocks?, links? }
  * @param {string} sourceLocale
  * @param {string} targetLocale
  * @param {Object} options
- * @returns {Object} - Translated structured text value (blocks stripped — DatoCMS API cannot create blocks per-locale via items.update)
+ * @returns {Object} - Translated structured text with new block records
  */
 async function translateFullDast(structuredText, sourceLocale, targetLocale, options = {}) {
   if (!structuredText) return structuredText;
@@ -190,78 +192,105 @@ async function translateFullDast(structuredText, sourceLocale, targetLocale, opt
   const translated = deepClone(structuredText);
 
   if (translated.document && translated.document.children) {
-    const blockCount = translated.document.children.filter(c => c.type === "block").length;
+    // Step 1: Process blocks — clone without ID to create new per-locale block records
+    const blockCount = await processBlockNodes(translated.document, sourceLocale, targetLocale, options);
 
-    // Remove block nodes — DatoCMS API does not support creating new block records
-    // per-locale via items.update(). Block content must be added manually in the CMS UI.
-    if (blockCount > 0) {
-      translated.document.children = translated.document.children.filter(c => c.type !== "block");
-      console.log(`   📄 DAST doc: ${translated.document.children.length} translatable nodes (${blockCount} blocks stripped — API limitation)`);
-    } else {
-      console.log(`   📄 DAST doc: ${translated.document.children.length} translatable nodes`);
-    }
+    // Step 2: Translate text nodes (paragraphs, headings, links, etc.)
+    await translateDastNode(translated.document, sourceLocale, targetLocale, options);
 
-    // Remove blocks/links arrays (they reference block records that don't exist in this locale)
+    // Remove blocks/links arrays — not needed when blocks are embedded as full objects
     delete translated.blocks;
     delete translated.links;
 
-    await translateDastNode(translated.document, sourceLocale, targetLocale, options);
+    const textNodeCount = translated.document.children.filter(c => c.type !== "block" && c.type !== "inlineItem").length;
+    console.log(`   📄 DAST → ${targetLocale}: ${textNodeCount} text nodes translated, ${blockCount} blocks cloned`);
   }
 
   return translated;
 }
 
 /**
- * Translate a single block's translatable fields.
- * Determines block type from item_type and translates matching fields.
+ * Recursively process block and inlineItem nodes in DAST.
+ *
+ * For nested blocks (full JSON:API objects from `nested: true` fetch):
+ * - Clones the block object
+ * - Removes the `id` so the DatoCMS API creates a NEW block record for this locale
+ * - Translates known text fields in the block's attributes
+ *
+ * For non-nested blocks (string IDs):
+ * - Strips them since block IDs are per-locale and won't work in the target locale
+ *
+ * @returns {number} Count of blocks processed
  */
-async function translateBlock(block, sourceLocale, targetLocale, options) {
-  if (!block || !block.item_type) return;
+async function processBlockNodes(node, sourceLocale, targetLocale, options) {
+  if (!node || !node.children) return 0;
+  let count = 0;
 
-  // Get the block type API key — could be in different formats depending on CMA response
-  const blockTypeId = block.item_type?.id || block.item_type;
+  for (const child of node.children) {
+    if ((child.type === "block" || child.type === "inlineItem") && child.item) {
+      if (typeof child.item === "object" && child.item.type === "item") {
+        // ── Nested block (full JSON:API object) ──
+        // Clone and remove ID → API will create a new block record for this locale
+        const newBlock = deepClone(child.item);
+        delete newBlock.id;
+        delete newBlock.meta;
 
-  // Try to match by known block fields (since we might not have the API key directly)
-  // We check which translatable fields exist on this block
-  let fieldsToTranslate = null;
+        // Translate text fields in block attributes
+        if (newBlock.attributes) {
+          const translatableKeys = detectTranslatableAttributes(newBlock.attributes);
+          for (const fieldKey of translatableKeys) {
+            const value = newBlock.attributes[fieldKey];
+            try {
+              console.log(`   📝 Block field "${fieldKey}": translating "${String(value).substring(0, 60)}..."`);
+              newBlock.attributes[fieldKey] = await translateSingleField(
+                value, sourceLocale, targetLocale,
+                { ...options, fieldName: `block.${fieldKey}` }
+              );
+            } catch (e) {
+              console.error(`  ⚠️  Block field "${fieldKey}" translate failed: ${e.message}`);
+            }
+          }
+        }
 
-  // First try: match by item_type api_key if available
-  if (block.item_type?.attributes?.api_key) {
-    fieldsToTranslate = TRANSLATABLE_BLOCK_FIELDS[block.item_type.attributes.api_key];
-  }
-
-  // Fallback: auto-detect by checking which known fields exist on the block
-  if (!fieldsToTranslate) {
-    for (const [blockType, blockFields] of Object.entries(TRANSLATABLE_BLOCK_FIELDS)) {
-      const hasMatchingFields = blockFields.some((f) => f in block);
-      if (hasMatchingFields) {
-        fieldsToTranslate = blockFields;
-        console.log(`   🔧 Block ${block.id}: auto-detected as "${blockType}" (has fields: ${blockFields.filter(f => f in block).join(", ")})`);
-        break;
+        child.item = newBlock;
+        count++;
+      } else if (typeof child.item === "string") {
+        // ── Non-nested (string ID) — cannot create new block without data ──
+        console.log(`   ⚠️  Block "${child.item}": string ID (not nested) — stripping. Fetch record with nested:true to preserve blocks.`);
+        child.type = "__stripped_block";
       }
     }
-  }
 
-  if (!fieldsToTranslate) {
-    // Not a translatable block type (video, gallery, apartment_slider, space, etc.)
-    console.log(`   ⏭️  Block ${block.id}: no translatable fields found, copying as-is`);
-    return;
-  }
-
-  for (const fieldKey of fieldsToTranslate) {
-    const value = block[fieldKey];
-    if (!value || typeof value !== "string" || !value.trim()) continue;
-
-    try {
-      console.log(`   📝 Block ${block.id} field "${fieldKey}": translating "${value.substring(0, 50)}..."`);
-      block[fieldKey] = await translateSingleField(
-        value, sourceLocale, targetLocale,
-        { ...options, fieldName: `block.${fieldKey}` }
-      );
-    } catch (e) {
-      console.error(`  ⚠️  Block ${block.id} field "${fieldKey}" translate failed: ${e.message}`);
+    // Recurse into container nodes (list, listItem, blockquote, etc.)
+    if (child.children) {
+      count += await processBlockNodes(child, sourceLocale, targetLocale, options);
     }
   }
+
+  // Remove stripped blocks
+  if (node.children) {
+    node.children = node.children.filter(c => c.type !== "__stripped_block");
+  }
+
+  return count;
+}
+
+/**
+ * Detect which attributes of a block are translatable text fields.
+ * Returns array of attribute keys that should be translated.
+ */
+function detectTranslatableAttributes(attributes) {
+  return Object.keys(attributes).filter(key => {
+    const value = attributes[key];
+    // Only translate non-empty strings
+    if (!value || typeof value !== "string" || !value.trim()) return false;
+    // Skip non-translatable patterns (URLs, IDs, technical values)
+    if (NON_TRANSLATABLE_PATTERNS.some(p => p.test(key))) return false;
+    // Include known text fields
+    if (KNOWN_TRANSLATABLE_BLOCK_FIELDS.includes(key)) return true;
+    // Unknown fields — skip (safer default)
+    return false;
+  });
 }
 
 /**
@@ -271,7 +300,7 @@ async function translateDastNode(node, sourceLocale, targetLocale, options) {
   if (!node || !node.children) return;
 
   for (const child of node.children) {
-    // Skip non-translatable nodes (blocks are handled separately via blocks array)
+    // Skip blocks (handled by processBlockNodes), inline items, and thematic breaks
     if (child.type === "block" || child.type === "inlineItem" || child.type === "thematicBreak") {
       continue;
     }
