@@ -210,15 +210,71 @@ async function translateFullDast(structuredText, sourceLocale, targetLocale, opt
 }
 
 /**
- * Recursively process block and inlineItem nodes in DAST.
+ * Recursively process a single block record for a target locale:
+ * 1. Removes `id` and `meta` so the API creates a new block record
+ * 2. Translates known text fields (strings) in attributes
+ * 3. Recursively processes nested modular content (arrays of sub-blocks)
+ * 4. Recursively processes nested structured text (DAST with blocks)
  *
- * For nested blocks (full JSON:API objects from `nested: true` fetch):
- * - Clones the block object
- * - Removes the `id` so the DatoCMS API creates a NEW block record for this locale
- * - Translates known text fields in the block's attributes
- *
- * For non-nested blocks (string IDs):
- * - Strips them since block IDs are per-locale and won't work in the target locale
+ * Modifies `block` IN-PLACE. Returns count of blocks processed (including children).
+ */
+async function processBlockRecord(block, sourceLocale, targetLocale, options) {
+  if (!block || typeof block !== "object" || block.type !== "item") return 0;
+
+  delete block.id;
+  delete block.meta;
+
+  let count = 1; // this block itself
+
+  if (!block.attributes) return count;
+
+  for (const [fieldKey, value] of Object.entries(block.attributes)) {
+    // ── String field → translate if known text field ──
+    if (typeof value === "string" && value.trim()) {
+      if (NON_TRANSLATABLE_PATTERNS.some(p => p.test(fieldKey))) continue;
+      if (!KNOWN_TRANSLATABLE_BLOCK_FIELDS.includes(fieldKey)) continue;
+
+      try {
+        console.log(`   📝 Block field "${fieldKey}": translating "${value.substring(0, 60)}..." → ${targetLocale}`);
+        block.attributes[fieldKey] = await translateSingleField(
+          value, sourceLocale, targetLocale,
+          { ...options, fieldName: `block.${fieldKey}` }
+        );
+      } catch (e) {
+        console.error(`  ⚠️  Block field "${fieldKey}" translate failed: ${e.message}`);
+      }
+      continue;
+    }
+
+    // ── Array of sub-blocks (modular content inside a block) ──
+    if (Array.isArray(value) && value.length > 0 && value[0] && typeof value[0] === "object" && value[0].type === "item") {
+      console.log(`   🔄 Block field "${fieldKey}": recursing into ${value.length} nested sub-blocks`);
+      for (const subBlock of value) {
+        count += await processBlockRecord(subBlock, sourceLocale, targetLocale, options);
+      }
+      continue;
+    }
+
+    // ── DAST (structured text inside a block) ──
+    if (value && typeof value === "object" && !Array.isArray(value) && value.schema === "dast" && value.document) {
+      console.log(`   🔄 Block field "${fieldKey}": recursing into nested structured text`);
+      // Process block nodes inside the nested DAST
+      const nestedBlockCount = await processBlockNodes(value.document, sourceLocale, targetLocale, options);
+      // Translate text spans in the nested DAST
+      await translateDastNode(value.document, sourceLocale, targetLocale, options);
+      delete value.blocks;
+      delete value.links;
+      count += nestedBlockCount;
+      continue;
+    }
+  }
+
+  return count;
+}
+
+/**
+ * Process block/inlineItem nodes in a DAST document node.
+ * For each nested block, calls processBlockRecord to handle it recursively.
  *
  * @returns {number} Count of blocks processed
  */
@@ -229,39 +285,17 @@ async function processBlockNodes(node, sourceLocale, targetLocale, options) {
   for (const child of node.children) {
     if ((child.type === "block" || child.type === "inlineItem") && child.item) {
       if (typeof child.item === "object" && child.item.type === "item") {
-        // ── Nested block (full JSON:API object) ──
-        // Clone and remove ID → API will create a new block record for this locale
+        // Nested block — process recursively (removes id, translates, handles sub-blocks)
         const newBlock = deepClone(child.item);
-        delete newBlock.id;
-        delete newBlock.meta;
-
-        // Translate text fields in block attributes
-        if (newBlock.attributes) {
-          const translatableKeys = detectTranslatableAttributes(newBlock.attributes);
-          for (const fieldKey of translatableKeys) {
-            const value = newBlock.attributes[fieldKey];
-            try {
-              console.log(`   📝 Block field "${fieldKey}": translating "${String(value).substring(0, 60)}..."`);
-              newBlock.attributes[fieldKey] = await translateSingleField(
-                value, sourceLocale, targetLocale,
-                { ...options, fieldName: `block.${fieldKey}` }
-              );
-            } catch (e) {
-              console.error(`  ⚠️  Block field "${fieldKey}" translate failed: ${e.message}`);
-            }
-          }
-        }
-
+        count += await processBlockRecord(newBlock, sourceLocale, targetLocale, options);
         child.item = newBlock;
-        count++;
       } else if (typeof child.item === "string") {
-        // ── Non-nested (string ID) — cannot create new block without data ──
-        console.log(`   ⚠️  Block "${child.item}": string ID (not nested) — stripping. Fetch record with nested:true to preserve blocks.`);
+        console.log(`   ⚠️  Block "${child.item}": string ID (not nested) — stripping. Fetch with nested:true.`);
         child.type = "__stripped_block";
       }
     }
 
-    // Recurse into container nodes (list, listItem, blockquote, etc.)
+    // Recurse into DAST container nodes (list, listItem, blockquote, etc.)
     if (child.children) {
       count += await processBlockNodes(child, sourceLocale, targetLocale, options);
     }
@@ -273,24 +307,6 @@ async function processBlockNodes(node, sourceLocale, targetLocale, options) {
   }
 
   return count;
-}
-
-/**
- * Detect which attributes of a block are translatable text fields.
- * Returns array of attribute keys that should be translated.
- */
-function detectTranslatableAttributes(attributes) {
-  return Object.keys(attributes).filter(key => {
-    const value = attributes[key];
-    // Only translate non-empty strings
-    if (!value || typeof value !== "string" || !value.trim()) return false;
-    // Skip non-translatable patterns (URLs, IDs, technical values)
-    if (NON_TRANSLATABLE_PATTERNS.some(p => p.test(key))) return false;
-    // Include known text fields
-    if (KNOWN_TRANSLATABLE_BLOCK_FIELDS.includes(key)) return true;
-    // Unknown fields — skip (safer default)
-    return false;
-  });
 }
 
 /**
@@ -439,39 +455,20 @@ async function translateModularContentField(blocks, sourceLocale, targetLocales,
   for (const targetLocale of targetLocales) {
     try {
       const translatedBlocks = [];
+      let totalCount = 0;
 
       for (const block of blocks) {
         if (typeof block === "object" && block.type === "item") {
-          // ── Nested block (full JSON:API object) ──
           const newBlock = deepClone(block);
-          delete newBlock.id;   // Remove ID → API creates new block record
-          delete newBlock.meta; // Remove metadata
-
-          // Translate text fields in block attributes
-          if (newBlock.attributes) {
-            const translatableKeys = detectTranslatableAttributes(newBlock.attributes);
-            for (const fieldKey of translatableKeys) {
-              const value = newBlock.attributes[fieldKey];
-              try {
-                console.log(`   📝 MC block "${fieldKey}": translating "${String(value).substring(0, 60)}..." → ${targetLocale}`);
-                newBlock.attributes[fieldKey] = await translateSingleField(
-                  value, sourceLocale, targetLocale,
-                  { ...options, fieldName: `modular_content.${fieldKey}` }
-                );
-              } catch (e) {
-                console.error(`  ⚠️  MC block field "${fieldKey}" translate failed: ${e.message}`);
-              }
-            }
-          }
-
+          // processBlockRecord handles: remove id/meta, translate text, recurse into sub-blocks
+          totalCount += await processBlockRecord(newBlock, sourceLocale, targetLocale, options);
           translatedBlocks.push(newBlock);
         } else if (typeof block === "string") {
-          // Non-nested (string ID) — can't clone without data, skip
           console.log(`   ⚠️  MC block "${block}": string ID (not nested) — skipping. Fetch with nested:true.`);
         }
       }
 
-      console.log(`   ✅ MC → ${targetLocale}: ${translatedBlocks.length} blocks cloned`);
+      console.log(`   ✅ MC → ${targetLocale}: ${translatedBlocks.length} top-level blocks, ${totalCount} total (including nested)`);
       result[targetLocale] = translatedBlocks;
     } catch (error) {
       console.error(`  ⚠️  MC translation to ${targetLocale} failed: ${error.message}`);
