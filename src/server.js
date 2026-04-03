@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const path = require("path");
 const { processAsset } = require("./alt-generator");
 const { getDatocmsClient } = require("./datocms-client");
-const { translateFields, translateStructuredTextField, translateSeoField } = require("./translator");
+const { translateFields, translateStructuredTextField, translateModularContentField, translateSeoField } = require("./translator");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -295,12 +295,16 @@ app.post("/translate-record", async (req, res) => {
     const localizedSeoFields = fields.filter(
       (f) => f.localized && f.field_type === "seo",
     );
+    const localizedModularFields = fields.filter(
+      (f) => f.localized && f.field_type === "rich_text",
+    );
 
-    console.log(`📋 Fields found — text: ${localizedTextFields.length}, DAST: ${localizedDastFields.length}, SEO: ${localizedSeoFields.length}`);
+    console.log(`📋 Fields found — text: ${localizedTextFields.length}, DAST: ${localizedDastFields.length}, MC: ${localizedModularFields.length}, SEO: ${localizedSeoFields.length}`);
     console.log(`   DAST fields: ${localizedDastFields.map(f => f.api_key).join(", ") || "none"}`);
+    console.log(`   MC fields: ${localizedModularFields.map(f => f.api_key).join(", ") || "none"}`);
     console.log(`   SEO fields: ${localizedSeoFields.map(f => f.api_key).join(", ") || "none"}`);
 
-    const translatableCount = localizedTextFields.length + localizedDastFields.length + localizedSeoFields.length;
+    const translatableCount = localizedTextFields.length + localizedDastFields.length + localizedModularFields.length + localizedSeoFields.length;
     if (translatableCount === 0) {
       return res.json({ status: "skipped", message: "No localized translatable fields in this model" });
     }
@@ -372,13 +376,32 @@ app.post("/translate-record", async (req, res) => {
       }
     }
 
-    const totalToTranslate = Object.keys(sourceFields).length + Object.keys(sourceDastFields).length + Object.keys(sourceSeoFields).length;
+    // ── Extract source modular content fields ──
+    const sourceModularFields = {};
+    for (const field of localizedModularFields) {
+      const fieldValue = record[field.api_key];
+      if (!fieldValue || typeof fieldValue !== "object") continue;
+
+      const sourceBlocks = fieldValue[sourceLocale];
+      if (!sourceBlocks || !Array.isArray(sourceBlocks) || sourceBlocks.length === 0) continue;
+
+      const targetsMissing = targetLocales.some((l) => {
+        const val = fieldValue[l];
+        return !val || !Array.isArray(val) || val.length === 0;
+      });
+
+      if (targetsMissing || overwrite) {
+        sourceModularFields[field.api_key] = sourceBlocks;
+      }
+    }
+
+    const totalToTranslate = Object.keys(sourceFields).length + Object.keys(sourceDastFields).length + Object.keys(sourceModularFields).length + Object.keys(sourceSeoFields).length;
 
     if (totalToTranslate === 0) {
       return res.json({ status: "skipped", message: "All fields already translated", translated: 0 });
     }
 
-    console.log(`🌐 Translating record ${recordId} (${modelName}): ${Object.keys(sourceFields).length} text, ${Object.keys(sourceDastFields).length} DAST, ${Object.keys(sourceSeoFields).length} SEO`);
+    console.log(`🌐 Translating record ${recordId} (${modelName}): ${Object.keys(sourceFields).length} text, ${Object.keys(sourceDastFields).length} DAST, ${Object.keys(sourceModularFields).length} MC, ${Object.keys(sourceSeoFields).length} SEO`);
 
     // ── Translate text fields ──
     const translations = Object.keys(sourceFields).length > 0
@@ -400,6 +423,20 @@ app.post("/translate-record", async (req, res) => {
         );
       } catch (e) {
         console.error(`  ⚠️  DAST field ${fieldApiKey} translation failed: ${e.message}`);
+      }
+    }
+
+    // ── Translate modular content fields ──
+    // Blocks are cloned without IDs — same approach as structured text blocks.
+    const modularTranslations = {}; // { fieldApiKey: { en: [blocks], ru: [blocks] } }
+    for (const [fieldApiKey, sourceBlocks] of Object.entries(sourceModularFields)) {
+      try {
+        console.log(`   🧩 MC "${fieldApiKey}": ${sourceBlocks.length} blocks — translating with block cloning`);
+        modularTranslations[fieldApiKey] = await translateModularContentField(
+          sourceBlocks, sourceLocale, targetLocales, { modelName, fieldName: fieldApiKey }
+        );
+      } catch (e) {
+        console.error(`  ⚠️  MC field ${fieldApiKey} translation failed: ${e.message}`);
       }
     }
 
@@ -445,6 +482,21 @@ app.post("/translate-record", async (req, res) => {
           if (dastTranslations[apiKey][locale]) {
             if (!overwrite && updatedValue[locale] && updatedValue[locale].document && updatedValue[locale].document.children && updatedValue[locale].document.children.length > 0) continue;
             updatedValue[locale] = dastTranslations[apiKey][locale];
+          } else if (!(locale in updatedValue)) {
+            updatedValue[locale] = null;
+          }
+        }
+        updatePayload[apiKey] = updatedValue;
+        continue;
+      }
+
+      // ── Modular content fields we translated ──
+      if (sourceModularFields[apiKey] && modularTranslations[apiKey]) {
+        const updatedValue = { ...(currentValue || {}) };
+        for (const locale of targetLocales) {
+          if (modularTranslations[apiKey][locale]) {
+            if (!overwrite && updatedValue[locale] && Array.isArray(updatedValue[locale]) && updatedValue[locale].length > 0) continue;
+            updatedValue[locale] = modularTranslations[apiKey][locale];
           } else if (!(locale in updatedValue)) {
             updatedValue[locale] = null;
           }
@@ -547,14 +599,17 @@ app.post("/bulk-translate", async (req, res) => {
       const seoFields = fields.filter(
         (f) => f.localized && f.field_type === "seo",
       );
+      const modularFields = fields.filter(
+        (f) => f.localized && f.field_type === "rich_text",
+      );
 
-      const translatableCount = textFields.length + dastFields.length + seoFields.length;
+      const translatableCount = textFields.length + dastFields.length + modularFields.length + seoFields.length;
       if (translatableCount === 0) {
         console.log(`  ⏭️  ${model.api_key}: no localized translatable fields`);
         continue;
       }
 
-      console.log(`\n📋 Model: ${model.api_key} (${textFields.length} text, ${dastFields.length} DAST, ${seoFields.length} SEO)`);
+      console.log(`\n📋 Model: ${model.api_key} (${textFields.length} text, ${dastFields.length} DAST, ${modularFields.length} MC, ${seoFields.length} SEO)`);
 
       // Get all records for this model
       const records = [];
@@ -572,6 +627,7 @@ app.post("/bulk-translate", async (req, res) => {
         // Extract source values
         const sourceTextFields = {};
         const sourceDastFields = {};
+        const sourceModularFields = {};
         const sourceSeoFields = {};
 
         for (const field of textFields) {
@@ -613,14 +669,26 @@ app.post("/bulk-translate", async (req, res) => {
           if (targetsMissing || overwrite) sourceSeoFields[field.api_key] = sourceSeo;
         }
 
-        const totalFields = Object.keys(sourceTextFields).length + Object.keys(sourceDastFields).length + Object.keys(sourceSeoFields).length;
+        for (const field of modularFields) {
+          const fieldValue = record[field.api_key];
+          if (!fieldValue || typeof fieldValue !== "object") continue;
+          const sourceBlocks = fieldValue[sourceLocale];
+          if (!sourceBlocks || !Array.isArray(sourceBlocks) || sourceBlocks.length === 0) continue;
+          const targetsMissing = targetLocales.some((l) => {
+            const val = fieldValue[l];
+            return !val || !Array.isArray(val) || val.length === 0;
+          });
+          if (targetsMissing || overwrite) sourceModularFields[field.api_key] = sourceBlocks;
+        }
+
+        const totalFields = Object.keys(sourceTextFields).length + Object.keys(sourceDastFields).length + Object.keys(sourceModularFields).length + Object.keys(sourceSeoFields).length;
         if (totalFields === 0) {
           totalSkipped++;
           continue;
         }
 
         if (dryRun) {
-          console.log(`   [DRY RUN] Would translate record ${record.id}: ${[...Object.keys(sourceTextFields), ...Object.keys(sourceDastFields), ...Object.keys(sourceSeoFields)].join(", ")}`);
+          console.log(`   [DRY RUN] Would translate record ${record.id}: ${[...Object.keys(sourceTextFields), ...Object.keys(sourceDastFields), ...Object.keys(sourceModularFields), ...Object.keys(sourceSeoFields)].join(", ")}`);
           totalProcessed++;
           continue;
         }
@@ -640,6 +708,18 @@ app.post("/bulk-translate", async (req, res) => {
               );
             } catch (e) {
               console.error(`   ⚠️  DAST ${apiKey}: ${e.message}`);
+            }
+          }
+
+          // Translate modular content fields
+          const modularTranslations = {};
+          for (const [apiKey, sourceBlocks] of Object.entries(sourceModularFields)) {
+            try {
+              modularTranslations[apiKey] = await translateModularContentField(
+                sourceBlocks, sourceLocale, targetLocales, { modelName: model.api_key, fieldName: apiKey }
+              );
+            } catch (e) {
+              console.error(`   ⚠️  MC ${apiKey}: ${e.message}`);
             }
           }
 
@@ -683,6 +763,20 @@ app.post("/bulk-translate", async (req, res) => {
                 if (dastTranslations[apiKey][locale]) {
                   if (!overwrite && updatedValue[locale] && updatedValue[locale].document && updatedValue[locale].document.children && updatedValue[locale].document.children.length > 0) continue;
                   updatedValue[locale] = dastTranslations[apiKey][locale];
+                } else if (!(locale in updatedValue)) {
+                  updatedValue[locale] = null;
+                }
+              }
+              updatePayload[apiKey] = updatedValue;
+              continue;
+            }
+
+            if (sourceModularFields[apiKey] && modularTranslations[apiKey]) {
+              const updatedValue = { ...(currentValue || {}) };
+              for (const locale of targetLocales) {
+                if (modularTranslations[apiKey][locale]) {
+                  if (!overwrite && updatedValue[locale] && Array.isArray(updatedValue[locale]) && updatedValue[locale].length > 0) continue;
+                  updatedValue[locale] = modularTranslations[apiKey][locale];
                 } else if (!(locale in updatedValue)) {
                   updatedValue[locale] = null;
                 }

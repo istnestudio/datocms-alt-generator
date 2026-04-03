@@ -412,6 +412,77 @@ async function translateStructuredTextField(structuredText, sourceLocale, target
 }
 
 // ══════════════════════════════════════════════
+// ── Modular Content translation ──
+// ══════════════════════════════════════════════
+
+/**
+ * Translate a DatoCMS Modular Content field (field_type: "rich_text").
+ *
+ * Modular content is an array of block records. With `nested: true`,
+ * each block is a full JSON:API object:
+ *   { id: "...", type: "item", attributes: {...}, relationships: { item_type: {...} }, meta: {...} }
+ *
+ * For target locales, we clone each block WITHOUT its `id` (so the API creates
+ * new per-locale block records) and translate known text fields.
+ *
+ * @param {Array} blocks - Source array of block objects (from nested fetch)
+ * @param {string} sourceLocale
+ * @param {string[]} targetLocales
+ * @param {Object} options
+ * @returns {Object} - { en: [translatedBlocks], ru: [translatedBlocks] }
+ */
+async function translateModularContentField(blocks, sourceLocale, targetLocales, options = {}) {
+  if (!blocks || !Array.isArray(blocks) || blocks.length === 0) return {};
+
+  const result = {};
+
+  for (const targetLocale of targetLocales) {
+    try {
+      const translatedBlocks = [];
+
+      for (const block of blocks) {
+        if (typeof block === "object" && block.type === "item") {
+          // ── Nested block (full JSON:API object) ──
+          const newBlock = deepClone(block);
+          delete newBlock.id;   // Remove ID → API creates new block record
+          delete newBlock.meta; // Remove metadata
+
+          // Translate text fields in block attributes
+          if (newBlock.attributes) {
+            const translatableKeys = detectTranslatableAttributes(newBlock.attributes);
+            for (const fieldKey of translatableKeys) {
+              const value = newBlock.attributes[fieldKey];
+              try {
+                console.log(`   📝 MC block "${fieldKey}": translating "${String(value).substring(0, 60)}..." → ${targetLocale}`);
+                newBlock.attributes[fieldKey] = await translateSingleField(
+                  value, sourceLocale, targetLocale,
+                  { ...options, fieldName: `modular_content.${fieldKey}` }
+                );
+              } catch (e) {
+                console.error(`  ⚠️  MC block field "${fieldKey}" translate failed: ${e.message}`);
+              }
+            }
+          }
+
+          translatedBlocks.push(newBlock);
+        } else if (typeof block === "string") {
+          // Non-nested (string ID) — can't clone without data, skip
+          console.log(`   ⚠️  MC block "${block}": string ID (not nested) — skipping. Fetch with nested:true.`);
+        }
+      }
+
+      console.log(`   ✅ MC → ${targetLocale}: ${translatedBlocks.length} blocks cloned`);
+      result[targetLocale] = translatedBlocks;
+    } catch (error) {
+      console.error(`  ⚠️  MC translation to ${targetLocale} failed: ${error.message}`);
+      result[targetLocale] = null;
+    }
+  }
+
+  return result;
+}
+
+// ══════════════════════════════════════════════
 // ── SEO field translation ──
 // ══════════════════════════════════════════════
 
@@ -479,5 +550,6 @@ module.exports = {
   translateFields,
   translateSingleField,
   translateStructuredTextField,
+  translateModularContentField,
   translateSeoField,
 };
